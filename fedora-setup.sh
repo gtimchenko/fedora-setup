@@ -23,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.1.1"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -1040,6 +1040,82 @@ install_third_party_apps() {
     cd - >/dev/null
 }
 
+configure_zsh_paths() {
+    log_section "Configuring ZSH paths for installed applications"
+    
+    if [[ ! -f "$HOME/.zshrc" ]]; then
+        log_warning ".zshrc not found, skipping path configuration"
+        return 1
+    fi
+    
+    # Remove old PATH configurations if they exist
+    sed -i '/# Application paths added by fedora-setup/,/# End application paths/d' "$HOME/.zshrc" 2>/dev/null || true
+    
+    # Add comprehensive PATH configuration
+    cat >> "$HOME/.zshrc" <<'EOF'
+
+# Application paths added by fedora-setup
+# User local binaries (common location for many installers including Zed)
+[[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"
+
+# User bin directory
+[[ -d "$HOME/bin" ]] && export PATH="$HOME/bin:$PATH"
+
+# User applications
+[[ -d "$HOME/Applications" ]] && export PATH="$HOME/Applications:$PATH"
+
+# Cargo (Rust) binaries
+[[ -d "$HOME/.cargo/bin" ]] && export PATH="$HOME/.cargo/bin:$PATH"
+
+# End application paths
+EOF
+    
+    log_success "ZSH paths configured for installed applications"
+}
+
+sync_bash_to_zsh_paths() {
+    log_section "Syncing PATH modifications from bash to zsh"
+    
+    if [[ ! -f "$HOME/.bashrc" ]] || [[ ! -f "$HOME/.zshrc" ]]; then
+        log_warning "Required profile files not found"
+        return 1
+    fi
+    
+    # Extract PATH modifications from .bashrc that were added recently
+    local bashrc_paths
+    bashrc_paths=$(grep -E '^export PATH=|^PATH=' "$HOME/.bashrc" 2>/dev/null | tail -5 || true)
+    
+    if [[ -n "$bashrc_paths" ]]; then
+        # Check if we need to add these paths (avoid duplicates)
+        local needs_sync=false
+        while IFS= read -r path_line; do
+            if ! grep -qF "$path_line" "$HOME/.zshrc" 2>/dev/null; then
+                needs_sync=true
+                break
+            fi
+        done <<< "$bashrc_paths"
+        
+        if [[ "$needs_sync" == "true" ]]; then
+            # Remove old synced paths
+            sed -i '/# Synced from bashrc by fedora-setup/,/# End synced paths/d' "$HOME/.zshrc" 2>/dev/null || true
+            
+            # Add new paths
+            {
+                echo ""
+                echo "# Synced from bashrc by fedora-setup"
+                echo "$bashrc_paths"
+                echo "# End synced paths"
+            } >> "$HOME/.zshrc"
+            
+            log_success "PATH modifications synced from bash to zsh"
+        else
+            log_success "All bash paths already present in zsh"
+        fi
+    else
+        log "No PATH modifications found in .bashrc"
+    fi
+}
+
 create_update_alias() {
     log_section "Creating update alias"
     
@@ -1103,6 +1179,10 @@ main() {
     download_third_party_apps
     install_third_party_apps
     
+    # Configure ZSH paths AFTER all installations are complete
+    configure_zsh_paths
+    sync_bash_to_zsh_paths
+    
     # Final configuration
     create_update_alias
     
@@ -1111,10 +1191,21 @@ main() {
     log ""
     log "Detected desktop environment: $DESKTOP_ENV"
     log ""
+    log "⚠️  IMPORTANT: Terminal Configuration Required"
+    log ""
     log "Next steps:"
-    log "  1. Restart your terminal or run: source ~/.zshrc"
-    log "  2. Log out and log back in to use ZSH as default shell"
-    log "  3. Run 'update' command to check for updates anytime"
+    log "  1. **CRITICAL**: Close this terminal and open a NEW terminal"
+    log "     (or run: exec zsh)"
+    log "  2. Verify installed commands work:"
+    log "     - Run: which zed"
+    log "     - Run: zed --version"
+    log "  3. If commands still don't work, log out and log back in"
+    log "  4. Use 'update' command anytime to update your system"
+    log ""
+    log "Why this is needed:"
+    log "  This script was run in bash, but your default shell is now zsh."
+    log "  Applications like Zed add themselves to PATH during installation."
+    log "  You need a fresh shell session for the new PATH to take effect."
     log ""
     log "Installed applications:"
     log "  - Editors: VS Code, Zed"
