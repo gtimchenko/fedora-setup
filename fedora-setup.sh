@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #
-# Fedora Workstation Post-Installation Setup Script
+# Fedora Post-Installation Setup Script
 # 
-# This script automates the setup of a fresh Fedora Workstation installation with:
+# This script automates the setup of a fresh Fedora installation with:
 # - ZSH with Oh My Zsh and Powerlevel10k theme
-# - FiraCode Nerd Font
-# - RPM Fusion repositories (free and nonfree)
+# - Comprehensive font collection (Nerd Fonts, Google, Microsoft, Apple)
+# - RPM Fusion repositories (free, nonfree, and tainted)
 # - Essential system tools and applications
 # - Performance optimizations
-# - Third-party applications (Chrome, 1Password, VS Code, etc.)
+# - Third-party applications (Chrome, 1Password, VS Code, Zed, etc.)
+# - Desktop environment detection (GNOME/KDE)
 #
 # Usage: ./fedora-setup.sh
 #
@@ -22,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -36,6 +37,9 @@ readonly FONT_ZIP_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest/d
 # DNF configuration
 readonly DNF_MAX_PARALLEL=10
 readonly DNF_DELTARPM=true
+
+# Desktop environment detection
+DESKTOP_ENV=""
 
 # ============================================================================
 # Utility Functions
@@ -51,6 +55,14 @@ log_error() {
 
 log_success() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] ✓ $*" | tee -a "$LOG_FILE"
+}
+
+log_warning() {
+    echo -e "\033[1;33m[$(date +'%Y-%m-%d %H:%M:%S')] ⚠ $*\033[0m" | tee -a "$LOG_FILE"
+}
+
+log_critical() {
+    echo -e "\033[1;31m[$(date +'%Y-%m-%d %H:%M:%S')] ✗ $*\033[0m" | tee -a "$LOG_FILE"
 }
 
 log_section() {
@@ -71,6 +83,97 @@ check_fedora() {
     fi
 }
 
+initial_system_update() {
+    log_section "Performing initial system update"
+    
+    log "Cleaning DNF cache..."
+    sudo dnf clean all >> "$LOG_FILE" 2>&1 || true
+    
+    log "Refreshing package metadata..."
+    sudo dnf makecache >> "$LOG_FILE" 2>&1 || true
+    
+    echo ""
+    log "Updating system packages (this may take a while)..."
+    echo ""
+    
+    # Perform system update
+    if sudo dnf -y upgrade --refresh; then
+        echo "Initial system update completed successfully" >> "$LOG_FILE"
+        echo ""
+        log_success "System updated successfully"
+    else
+        echo "Initial system update completed with some errors" >> "$LOG_FILE"
+        echo ""
+        log_warning "Some packages failed to update (continuing anyway)"
+    fi
+    
+    # Check if reboot is required
+    echo ""
+    log "Checking if reboot is required..."
+    
+    local needs_reboot=false
+    
+    # Check for kernel updates
+    if [[ "$(uname -r)" != "$(rpm -q --last kernel | head -1 | awk '{print $1}' | sed 's/kernel-//')" ]]; then
+        log_warning "Kernel has been updated"
+        needs_reboot=true
+    fi
+    
+    # Check using needs-restarting if available
+    if command_exists needs-restarting; then
+        if needs-restarting -r &>/dev/null; then
+            log_success "No reboot required by needs-restarting"
+        else
+            log_warning "Reboot required according to needs-restarting"
+            needs_reboot=true
+        fi
+    fi
+    
+    # Check for systemd or glibc updates (always require reboot)
+    if sudo dnf list --installed 2>/dev/null | grep -E "^(systemd|glibc)" | grep -q "@updates"; then
+        log_warning "Critical system packages (systemd/glibc) were updated"
+        needs_reboot=true
+    fi
+    
+    if [[ "$needs_reboot" == "true" ]]; then
+        echo ""
+        echo ""
+        log_critical "╔════════════════════════════════════════════════════════════════╗"
+        log_critical "║                                                                ║"
+        log_critical "║               ⚠️  REBOOT REQUIRED  ⚠️                           ║"
+        log_critical "║                                                                ║"
+        log_critical "║  Critical system packages have been updated.                  ║"
+        log_critical "║  Please reboot your system and run this script again.         ║"
+        log_critical "║                                                                ║"
+        log_critical "║  Run: sudo reboot                                             ║"
+        log_critical "║                                                                ║"
+        log_critical "╚════════════════════════════════════════════════════════════════╝"
+        echo ""
+        exit 0
+    else
+        log_success "No reboot required, continuing with setup..."
+    fi
+}
+
+detect_desktop_environment() {
+    log_section "Detecting desktop environment"
+    
+    # Check various environment variables and running processes
+    if [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]] || [[ "${DESKTOP_SESSION:-}" == *"plasma"* ]]; then
+        DESKTOP_ENV="KDE"
+    elif [[ "${XDG_CURRENT_DESKTOP:-}" == *"GNOME"* ]] || [[ "${DESKTOP_SESSION:-}" == *"gnome"* ]]; then
+        DESKTOP_ENV="GNOME"
+    elif pgrep -x "plasmashell" >/dev/null 2>&1; then
+        DESKTOP_ENV="KDE"
+    elif pgrep -x "gnome-shell" >/dev/null 2>&1; then
+        DESKTOP_ENV="GNOME"
+    else
+        DESKTOP_ENV="UNKNOWN"
+    fi
+    
+    log_success "Desktop environment detected: $DESKTOP_ENV"
+}
+
 # ============================================================================
 # Installation Functions
 # ============================================================================
@@ -78,7 +181,7 @@ check_fedora() {
 install_basic_packages() {
     log_section "Installing basic packages"
     
-    if sudo dnf -y install zsh unzip dnf5-plugins 2>&1 | tee -a "$LOG_FILE"; then
+    if sudo dnf -y install git zsh unzip dnf5-plugins p7zip p7zip-plugins 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Basic packages installed"
     else
         log_error "Failed to install some basic packages (continuing anyway)"
@@ -89,7 +192,7 @@ install_nerd_font() {
     log_section "Installing FiraCode Nerd Font"
     
     if fc-list ":family=$FONT_NAME" | grep -q .; then
-        log_success "Font already installed"
+        log_success "FiraCode Nerd Font already installed"
         return 0
     fi
     
@@ -102,18 +205,131 @@ install_nerd_font() {
         unzip -oq "$temp_zip" && rm -f "$temp_zip"
         fc-cache -f >/dev/null
         cd - >/dev/null
-        log_success "Font installed successfully"
+        log_success "FiraCode Nerd Font installed successfully"
     else
-        log_error "Failed to download font"
+        log_error "Failed to download FiraCode Nerd Font"
         return 1
     fi
+}
+
+install_system_fonts() {
+    log_section "Installing system fonts"
+    
+    # Base recommended fonts
+    log "Installing base recommended fonts..."
+    if sudo dnf -y install \
+        google-noto-sans-fonts \
+        google-noto-sans-mono-fonts \
+        google-noto-emoji-fonts \
+        dejavu-sans-fonts \
+        dejavu-sans-mono-fonts \
+        liberation-fonts \
+        rsms-inter-fonts \
+        terminus-fonts 2>&1 | tee -a "$LOG_FILE"; then
+        log_success "Base fonts installed"
+    else
+        log_error "Some base fonts failed to install (continuing anyway)"
+    fi
+    
+    # Apple Fonts (SF Pro, SF Compact, SF Mono, New York)
+    echo ""
+    log "Installing Apple fonts (SF Pro / Compact / Mono / New York)..."
+    
+    local apple_dst="/usr/share/fonts/apple"
+    
+    # Check if fonts already installed
+    if [[ -d "$apple_dst" ]] && [[ -n "$(find "$apple_dst" -name '*.otf' -o -name '*.ttf' 2>/dev/null)" ]]; then
+        log_success "Apple fonts already installed"
+    else
+        sudo mkdir -p "$apple_dst"
+        local tmp_dir
+        tmp_dir=$(mktemp -d)
+        
+        pushd "$tmp_dir" >/dev/null 2>&1 || exit 1
+        
+        local apple_urls=(
+            "https://devimages-cdn.apple.com/design/resources/download/SF-Pro.dmg"
+            "https://devimages-cdn.apple.com/design/resources/download/SF-Compact.dmg"
+            "https://devimages-cdn.apple.com/design/resources/download/SF-Mono.dmg"
+            "https://devimages-cdn.apple.com/design/resources/download/NY.dmg"
+        )
+        
+        for url in "${apple_urls[@]}"; do
+            local file
+            file=$(basename "$url")
+            log "  Downloading $file..."
+            
+            if ! curl -fsSLO "$url"; then
+                log_error "  Failed to download $file, skipping"
+                continue
+            fi
+            
+            log "  Extracting $file..."
+            if ! 7z x "$file" -y >/dev/null 2>&1; then
+                log_error "  Failed to extract $file, skipping"
+                continue
+            fi
+            
+            # Extract .pkg files
+            for pkg in *.pkg; do
+                [[ -f "$pkg" ]] || continue
+                log "    Extracting $pkg..."
+                7z x "$pkg" -y >/dev/null 2>&1 || true
+            done
+            
+            # Extract Payload/payload
+            shopt -s nullglob
+            for payload in Payload* payload*; do
+                log "      Extracting $payload..."
+                7z x "$payload" -y >/dev/null 2>&1 || true
+            done
+            shopt -u nullglob
+        done
+        
+        log "  Copying font files to $apple_dst..."
+        shopt -s globstar nullglob
+        local font_count=0
+        for f in **/*.ttf **/*.otf; do
+            sudo cp -n "$f" "$apple_dst/" 2>/dev/null && ((font_count++)) || true
+        done
+        shopt -u globstar nullglob
+        
+        popd >/dev/null 2>&1 || exit 1
+        rm -rf "$tmp_dir"
+        
+        if [[ $font_count -gt 0 ]]; then
+            log_success "Apple fonts installed ($font_count files)"
+        else
+            log_error "No Apple fonts were extracted"
+        fi
+    fi
+    
+    log "Updating font cache..."
+    sudo fc-cache -f >/dev/null 2>&1 || true
+    log_success "Font cache updated"
 }
 
 configure_terminal_font() {
     log_section "Configuring terminal font"
     
+    case "$DESKTOP_ENV" in
+        GNOME)
+            configure_ptyxis_font
+            ;;
+        KDE)
+            configure_konsole_font
+            ;;
+        *)
+            log "Unknown desktop environment, skipping terminal font configuration"
+            ;;
+    esac
+}
+
+configure_ptyxis_font() {
+    log "Configuring Ptyxis (GNOME Terminal) font..."
+    
     if ! command_exists gsettings; then
-        log "gsettings not available, skipping terminal configuration"
+        log "gsettings not available, skipping Ptyxis configuration"
         return 0
     fi
     
@@ -126,11 +342,76 @@ configure_terminal_font() {
     if [[ "$current_font" != "'$FONT_SETTINGS'" ]] || [[ "$use_system_font" != "false" ]]; then
         gsettings set org.gnome.Ptyxis use-system-font false 2>&1 | tee -a "$LOG_FILE" || true
         gsettings set org.gnome.Ptyxis font-name "$FONT_SETTINGS" 2>&1 | tee -a "$LOG_FILE" || true
-        log_success "Terminal font configured (restart terminal to apply)"
-        exit 0
+        log_success "Ptyxis font configured (restart terminal to apply)"
     else
-        log_success "Terminal font already configured"
+        log_success "Ptyxis font already configured"
     fi
+}
+
+configure_konsole_font() {
+    log "Configuring Konsole (KDE Terminal) font..."
+    
+    local konsole_profile_dir="$HOME/.local/share/konsole"
+    local profile_file="$konsole_profile_dir/Profile.profile"
+    
+    # Create Konsole profile directory if it doesn't exist
+    mkdir -p "$konsole_profile_dir"
+    
+    # Check if custom profile exists
+    if [[ ! -f "$profile_file" ]]; then
+        log "Creating new Konsole profile..."
+        cat > "$profile_file" <<EOF
+[Appearance]
+ColorScheme=Breeze
+Font=FiraCode Nerd Font Mono,10,-1,5,50,0,0,0,0,0
+
+[General]
+Name=Profile
+Parent=FALLBACK/
+EOF
+        log_success "Konsole profile created"
+    else
+        # Update existing profile
+        if grep -q '^\[Appearance\]' "$profile_file"; then
+            if ! grep -q '^Font=FiraCode Nerd Font Mono' "$profile_file"; then
+                # Add or update Font line in [Appearance] section
+                sed -i '/^\[Appearance\]/a Font=FiraCode Nerd Font Mono,10,-1,5,50,0,0,0,0,0' "$profile_file"
+                log_success "Konsole font updated in existing profile"
+            else
+                log_success "Konsole font already configured"
+            fi
+        else
+            # No [Appearance] section, add it
+            cat >> "$profile_file" <<EOF
+
+[Appearance]
+ColorScheme=Breeze
+Font=FiraCode Nerd Font Mono,10,-1,5,50,0,0,0,0,0
+EOF
+            log_success "Konsole font configured"
+        fi
+    fi
+    
+    # Set as default profile in konsolerc
+    local konsolerc="$HOME/.config/konsolerc"
+    if [[ -f "$konsolerc" ]]; then
+        if ! grep -q '^\[Desktop Entry\]' "$konsolerc"; then
+            echo "[Desktop Entry]" >> "$konsolerc"
+        fi
+        if grep -q '^DefaultProfile=' "$konsolerc"; then
+            sed -i 's|^DefaultProfile=.*|DefaultProfile=Profile.profile|' "$konsolerc"
+        else
+            sed -i '/^\[Desktop Entry\]/a DefaultProfile=Profile.profile' "$konsolerc"
+        fi
+    else
+        mkdir -p "$(dirname "$konsolerc")"
+        cat > "$konsolerc" <<EOF
+[Desktop Entry]
+DefaultProfile=Profile.profile
+EOF
+    fi
+    
+    log_success "Konsole font configured (restart Konsole to apply)"
 }
 
 setup_zsh() {
@@ -239,26 +520,52 @@ optimize_system() {
     fi
 }
 
-disable_gnome_software_autostart() {
-    log_section "Disabling GNOME Software autostart"
+disable_software_autostart() {
+    log_section "Disabling software store autostart"
     
     mkdir -p "$HOME/.config/autostart"
     
-    if [[ -f /etc/xdg/autostart/org.gnome.Software.desktop ]]; then
-        local autostart_file="$HOME/.config/autostart/org.gnome.Software.desktop"
-        
-        if [[ ! -f "$autostart_file" ]]; then
-            cp /etc/xdg/autostart/org.gnome.Software.desktop "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
-        fi
-        
-        if grep -q '^Hidden=' "$autostart_file" 2>/dev/null; then
-            sed -i 's/^Hidden=.*/Hidden=true/' "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
-        else
-            printf '\nHidden=true\n' >> "$autostart_file"
-        fi
-        
-        log_success "GNOME Software autostart disabled"
-    fi
+    case "$DESKTOP_ENV" in
+        GNOME)
+            # Disable GNOME Software
+            if [[ -f /etc/xdg/autostart/org.gnome.Software.desktop ]]; then
+                local autostart_file="$HOME/.config/autostart/org.gnome.Software.desktop"
+                
+                if [[ ! -f "$autostart_file" ]]; then
+                    cp /etc/xdg/autostart/org.gnome.Software.desktop "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
+                fi
+                
+                if grep -q '^Hidden=' "$autostart_file" 2>/dev/null; then
+                    sed -i 's/^Hidden=.*/Hidden=true/' "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
+                else
+                    printf '\nHidden=true\n' >> "$autostart_file"
+                fi
+                
+                log_success "GNOME Software autostart disabled"
+            fi
+            ;;
+        KDE)
+            # Disable Discover autostart
+            if [[ -f /etc/xdg/autostart/org.kde.discover.notifier.desktop ]]; then
+                local autostart_file="$HOME/.config/autostart/org.kde.discover.notifier.desktop"
+                
+                if [[ ! -f "$autostart_file" ]]; then
+                    cp /etc/xdg/autostart/org.kde.discover.notifier.desktop "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
+                fi
+                
+                if grep -q '^Hidden=' "$autostart_file" 2>/dev/null; then
+                    sed -i 's/^Hidden=.*/Hidden=true/' "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
+                else
+                    printf '\nHidden=true\n' >> "$autostart_file"
+                fi
+                
+                log_success "KDE Discover autostart disabled"
+            fi
+            ;;
+        *)
+            log "Unknown desktop environment, skipping software store autostart configuration"
+            ;;
+    esac
 }
 
 setup_repositories() {
@@ -267,23 +574,29 @@ setup_repositories() {
     local fedora_version
     fedora_version=$(rpm -E %fedora)
     
-    # RPM Fusion
+    # RPM Fusion (free and nonfree)
     log "Adding RPM Fusion repositories..."
     sudo dnf -y install \
         "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${fedora_version}.noarch.rpm" \
         "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${fedora_version}.noarch.rpm" \
         2>&1 | tee -a "$LOG_FILE" || true
     
+    # RPM Fusion Tainted (free and nonfree)
+    log "Adding RPM Fusion Tainted repositories..."
+    sudo dnf -y install \
+        rpmfusion-free-release-tainted \
+        rpmfusion-nonfree-release-tainted \
+        2>&1 | tee -a "$LOG_FILE" || true
+    
+    log_success "RPM Fusion repositories (including tainted) configured"
+    
+    # Fedora Workstation repositories
     sudo dnf -y install fedora-workstation-repositories 2>&1 | tee -a "$LOG_FILE" || true
     
     # Configure third-party repos
     sudo dnf config-manager setopt google-chrome.enabled=1 2>&1 | tee -a "$LOG_FILE" || true
     sudo dnf config-manager setopt rpmfusion-nonfree-nvidia-driver.enabled=0 2>&1 | tee -a "$LOG_FILE" || true
     sudo dnf config-manager setopt rpmfusion-nonfree-steam.enabled=1 2>&1 | tee -a "$LOG_FILE" || true
-    
-    sudo dnf -y install rpmfusion-free-release-tainted rpmfusion-nonfree-release-tainted 2>&1 | tee -a "$LOG_FILE" || true
-    
-    log_success "RPM Fusion repositories configured"
     
     # 1Password repository
     log "Adding 1Password repository..."
@@ -325,34 +638,6 @@ EOF
     rm -f "$temp_repo"
 }
 
-upgrade_system() {
-    log_section "Upgrading system packages"
-    
-    log "Cleaning DNF cache..."
-    sudo dnf clean all >> "$LOG_FILE" 2>&1 || true
-    
-    log "Refreshing package metadata..."
-    sudo dnf makecache >> "$LOG_FILE" 2>&1 || true
-    
-    log "Updating PCI IDs database..."
-    sudo update-pciids >> "$LOG_FILE" 2>&1 || true
-    
-    echo ""
-    log "Upgrading all packages (this may take a while)..."
-    echo ""
-    
-    # Run upgrade with visible progress, log summary to file
-    if sudo dnf -y upgrade --refresh; then
-        echo "dnf upgrade completed successfully" >> "$LOG_FILE"
-        echo ""
-        log_success "System upgraded successfully"
-    else
-        echo "dnf upgrade completed with some errors" >> "$LOG_FILE"
-        echo ""
-        log_error "Some packages failed to upgrade (continuing anyway)"
-    fi
-}
-
 install_packages() {
     log_section "Installing system packages"
     
@@ -378,6 +663,12 @@ install_packages() {
         # Applications
         google-chrome-stable 1password master-pdf-editor flatseal
     )
+    
+    # Add KDE-specific packages
+    if [[ "$DESKTOP_ENV" == "KDE" ]]; then
+        packages+=(virt-manager)
+        log "KDE detected, adding virt-manager to installation list"
+    fi
     
     echo ""
     log "Installing main packages..."
@@ -425,14 +716,23 @@ install_flatpaks() {
         log "Flathub repository already exists or failed to add (continuing anyway)"
     fi
     
+    # Common apps for all desktop environments
     local flatpak_apps=(
-        com.mattjakeman.ExtensionManager
         com.spotify.Client
         com.termius.Termius
         net.cozic.joplin_desktop
         us.zoom.Zoom
         it.mijorus.gearlever
+        io.github.kolunmi.Bazaar
+        me.proton.Mail
+        org.gnome.World.PikaBackup
     )
+    
+    # Add GNOME-specific apps
+    if [[ "$DESKTOP_ENV" == "GNOME" ]]; then
+        flatpak_apps+=(com.mattjakeman.ExtensionManager)
+        log "GNOME detected, adding Extension Manager to installation list"
+    fi
     
     echo ""
     log "Installing Flatpak applications (this may take a while)..."
@@ -477,6 +777,22 @@ setup_ledger_udev() {
         rm -f "$temp_script"
     else
         log_error "Failed to download Ledger udev rules script"
+    fi
+}
+
+install_zed_editor() {
+    log_section "Installing Zed editor"
+    
+    if command_exists zed; then
+        log_success "Zed editor already installed"
+        return 0
+    fi
+    
+    log "Installing Zed editor..."
+    if curl -f https://zed.dev/install.sh | sh 2>&1 | tee -a "$LOG_FILE"; then
+        log_success "Zed editor installed"
+    else
+        log_error "Failed to install Zed editor"
     fi
 }
 
@@ -749,9 +1065,22 @@ main() {
     
     check_fedora
     
-    # Font and terminal setup
+    # Perform initial system update and check if reboot is needed
+    initial_system_update
+    
+    detect_desktop_environment
+    
+    # Basic packages and Nerd Font (doesn't require repos)
     install_basic_packages
     install_nerd_font
+    
+    # Repository setup (required for system fonts from tainted)
+    setup_repositories
+    
+    # System fonts installation (requires tainted repo for msttcorefonts)
+    install_system_fonts
+    
+    # Terminal font configuration
     configure_terminal_font
     
     # Shell setup
@@ -760,11 +1089,7 @@ main() {
     
     # System optimization
     optimize_system
-    disable_gnome_software_autostart
-    
-    # Repository setup
-    setup_repositories
-    upgrade_system
+    disable_software_autostart
     
     # Package installation
     install_packages
@@ -774,6 +1099,7 @@ main() {
     setup_ledger_udev
     
     # Third-party applications
+    install_zed_editor
     download_third_party_apps
     install_third_party_apps
     
@@ -783,17 +1109,27 @@ main() {
     log_section "Setup Complete!"
     log "Log file saved to: $LOG_FILE"
     log ""
+    log "Detected desktop environment: $DESKTOP_ENV"
+    log ""
     log "Next steps:"
     log "  1. Restart your terminal or run: source ~/.zshrc"
     log "  2. Log out and log back in to use ZSH as default shell"
     log "  3. Run 'update' command to check for updates anytime"
     log ""
     log "Installed applications:"
-    log "  - Terminal: Tabby, Ptyxis (configured)"
-    log "  - Development: VS Code, Bruno"
+    log "  - Editors: VS Code, Zed"
+    log "  - Terminal: Tabby"
+    log "  - Development: Bruno API Client"
     log "  - Communication: Telegram, Zoom"
     log "  - Utilities: Ledger Live, WinBox, balenaEtcher"
     log "  - Notes: Joplin"
+    log "  - Flatpaks: Bazaar, Proton Mail, PikaBackup, and more"
+    log ""
+    log "Installed fonts:"
+    log "  - FiraCode Nerd Font"
+    log "  - Google Noto (Sans, Mono, Emoji)"
+    log "  - DejaVu, Liberation, Inter, Terminus"
+    log "  - Apple fonts (SF Pro, SF Compact, SF Mono, New York)"
     log ""
     log "All done! Enjoy your Fedora setup!"
 }
