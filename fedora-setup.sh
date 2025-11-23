@@ -23,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.1.1"
+readonly SCRIPT_VERSION="1.1.2"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -592,6 +592,9 @@ setup_repositories() {
     
     # Fedora Workstation repositories
     sudo dnf -y install fedora-workstation-repositories 2>&1 | tee -a "$LOG_FILE" || true
+
+    # Fedora Repos Arhive
+    sudo dnf -y install fedora-repos-archive 2>&1 | tee -a "$LOG_FILE" || true
     
     # Configure third-party repos
     sudo dnf config-manager setopt google-chrome.enabled=1 2>&1 | tee -a "$LOG_FILE" || true
