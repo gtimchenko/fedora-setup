@@ -23,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.1.3"
+readonly SCRIPT_VERSION="1.1.4"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -658,7 +658,7 @@ install_packages() {
         wireguard-tools wget
         
         # System utilities
-        fastfetch solaar solaar-udev
+        fastfetch solaar solaar-udev tldr
         
         # FUSE support
         fuse fuse-libs fuse3 fuse3-libs
