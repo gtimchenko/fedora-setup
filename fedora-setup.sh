@@ -23,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.1.4"
+readonly SCRIPT_VERSION="1.1.5"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -893,18 +893,22 @@ download_third_party_apps() {
     
     # MikroTik WinBox
     log "Checking for WinBox updates..."
-    local winbox_url
-    winbox_url=$(curl -sL "https://mikrotik.com/download" | \
-                 grep -Eo 'https://download\.mikrotik\.com/routeros/winbox/[^"]+/WinBox_Linux\.zip' | head -n 1)
-    
+
+    # Download page URL
+    DOWNLOAD_PAGE="https://mikrotik.com/download/winbox"
+
+    # Fetch uWinBox Linux ZIP URL
+    winbox_url=$(curl -sL "$DOWNLOAD_PAGE" | \
+        grep -Eo 'https://cdn\.mikrotik\.com/routeros/winbox/[^"]+/WinBox_Linux\.zip' | head -n 1)
+
     if [[ -n "$winbox_url" ]]; then
-        local win_ver
         win_ver=$(printf '%s\n' "$winbox_url" | awk -F'/' '{print $(NF-1)}')
-        local winbox_file="winbox_${win_ver}.zip"
-        
+        winbox_file="winbox_${win_ver}.zip"
+
         if [[ ! -f "$winbox_file" ]]; then
             log "Downloading WinBox..."
             find . -maxdepth 1 -name "winbox_*.zip" -delete
+
             if wget --show-progress -O "$winbox_file" "$winbox_url" 2>&1; then
                 echo "WinBox downloaded: $winbox_file" >> "$LOG_FILE"
             else
@@ -913,6 +917,8 @@ download_third_party_apps() {
         else
             log "WinBox already downloaded"
         fi
+    else
+        log_error "WinBox URL not found — MikroTik page format may have changed"
     fi
     
     # balenaEtcher
