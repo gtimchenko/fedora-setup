@@ -23,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.1.5"
+readonly SCRIPT_VERSION="1.1.6"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -899,7 +899,7 @@ download_third_party_apps() {
 
     # Fetch uWinBox Linux ZIP URL
     winbox_url=$(curl -sL "$DOWNLOAD_PAGE" | \
-        grep -Eo 'https://cdn\.mikrotik\.com/routeros/winbox/[^"]+/WinBox_Linux\.zip' | head -n 1)
+        grep -Eo 'https://[a-z]+\.mikrotik\.com/routeros/winbox/[^"]+/WinBox_Linux\.zip' | head -n 1)
 
     if [[ -n "$winbox_url" ]]; then
         win_ver=$(printf '%s\n' "$winbox_url" | awk -F'/' '{print $(NF-1)}')
