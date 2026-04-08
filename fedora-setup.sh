@@ -23,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -265,8 +265,11 @@ bold_italic_font auto
 font_size        10.0
 
 # Window
-window_padding_width 4
-hide_window_decorations yes
+remember_window_size  no
+initial_window_width  150c
+initial_window_height 50c
+window_padding_width  4
+hide_window_decorations no
 confirm_os_window_close 0
 
 # Scrollback
@@ -407,6 +410,18 @@ FISHEOF
 alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids; or true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y'
 FISHEOF
             log_success "Update alias added to Fish config"
+        fi
+    fi
+
+    # Install Starship
+    if command -v starship >/dev/null 2>&1; then
+        log_success "Starship already installed"
+    else
+        log "Installing Starship..."
+        if curl -fsSL https://starship.rs/install.sh | sh -s -- -y; then
+            log_success "Starship installed"
+        else
+            log_error "Failed to install Starship"
         fi
     fi
 
@@ -667,7 +682,7 @@ install_packages() {
         wireguard-tools wget
         
         # Shell and terminal
-        fish kitty starship
+        fish kitty
 
         # System utilities
         fastfetch solaar solaar-udev tldr
