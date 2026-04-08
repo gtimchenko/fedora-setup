@@ -23,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.2.2"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -263,20 +263,39 @@ bold_font        auto
 italic_font      auto
 bold_italic_font auto
 font_size        10.0
+disable_ligatures never
+
+# Cursor
+cursor_shape          beam
+cursor_beam_thickness 1.5
+cursor_blink_interval 0.5
+cursor_stop_blinking_after 15.0
 
 # Window
 remember_window_size  no
-initial_window_width  150c
-initial_window_height 50c
-window_padding_width  4
+initial_window_width  160c
+initial_window_height 45c
+window_padding_width  6 8
+placement_strategy    center
 hide_window_decorations no
 confirm_os_window_close 0
+background_opacity    0.95
 
 # Scrollback
 scrollback_lines 10000
 
 # Bell
 enable_audio_bell no
+
+# URL
+url_style curly
+detect_urls yes
+
+# Tab bar
+tab_bar_edge        top
+tab_bar_style       powerline
+tab_powerline_style slanted
+tab_title_template  " {index}: {title} "
 
 # Theme (Catppuccin Mocha)
 foreground              #CDD6F4
@@ -285,7 +304,7 @@ selection_foreground     #1E1E2E
 selection_background     #F5E0DC
 cursor                  #F5E0DC
 cursor_text_color       #1E1E2E
-url_color               #F5E0DC
+url_color               #89B4FA
 
 # Black
 color0  #45475A
@@ -319,18 +338,20 @@ color14 #94E2D5
 color7  #BAC2DE
 color15 #A6ADC8
 
-# Tab bar
+# Tab bar colors
 active_tab_foreground   #11111B
 active_tab_background   #CBA6F7
 inactive_tab_foreground #CDD6F4
 inactive_tab_background #181825
 tab_bar_background      #11111B
-mark1_foreground        #1E1E2E
-mark1_background        #B4BEFE
-mark2_foreground        #1E1E2E
-mark2_background        #CBA6F7
-mark3_foreground        #1E1E2E
-mark3_background        #74C7EC
+
+# Marks
+mark1_foreground #1E1E2E
+mark1_background #B4BEFE
+mark2_foreground #1E1E2E
+mark2_background #CBA6F7
+mark3_foreground #1E1E2E
+mark3_background #74C7EC
 EOF
         log_success "Kitty configuration created"
     else
@@ -377,14 +398,55 @@ if command -q starship
     starship init fish | source
 end
 
-# Useful aliases
-alias ll='ls -lah'
-alias la='ls -A'
+# Transient prompt — show minimal prompt for previous commands
+function starship_transient_prompt_func
+    starship module character
+end
+enable_transient_prompt
+
+# Modern CLI replacements
+if command -q eza
+    alias ls='eza --icons --group-directories-first'
+    alias ll='eza -l --icons --group-directories-first --git'
+    alias la='eza -la --icons --group-directories-first --git'
+    alias lt='eza -T --icons --group-directories-first --level=2'
+else
+    alias ll='ls -lah'
+    alias la='ls -A'
+end
+
+if command -q bat
+    alias cat='bat --style=auto'
+    set -gx MANPAGER "sh -c 'col -bx | bat -l man -p'"
+end
+
+# Navigation
 alias ..='cd ..'
 alias ...='cd ../..'
+alias ....='cd ../../..'
+
+# Git abbreviations
+abbr -a ga 'git add'
+abbr -a gc 'git commit'
+abbr -a gp 'git push'
+abbr -a gl 'git pull'
+abbr -a gs 'git status'
+abbr -a gd 'git diff'
+abbr -a gco 'git checkout'
+abbr -a gb 'git branch'
+abbr -a glog 'git log --oneline --graph --decorate'
 
 # System update
 alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids; or true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y'
+
+# Colored man pages
+set -gx LESS_TERMCAP_mb \e'[1;31m'
+set -gx LESS_TERMCAP_md \e'[1;34m'
+set -gx LESS_TERMCAP_me \e'[0m'
+set -gx LESS_TERMCAP_se \e'[0m'
+set -gx LESS_TERMCAP_so \e'[1;33m'
+set -gx LESS_TERMCAP_ue \e'[0m'
+set -gx LESS_TERMCAP_us \e'[1;32m'
 FISHEOF
         log_success "Fish configuration created"
     else
@@ -430,54 +492,171 @@ FISHEOF
     if [[ ! -f "$starship_conf" ]]; then
         log "Creating Starship configuration..."
         cat > "$starship_conf" <<'STAREOF'
-# Starship prompt configuration
+# Starship prompt — Catppuccin Mocha powerline style
+
+palette = "catppuccin_mocha"
+
 format = """
+[](mauve)\
+$os\
 $username\
-$hostname\
+[](bg:blue fg:mauve)\
 $directory\
+[](bg:green fg:blue)\
 $git_branch\
 $git_status\
+[](bg:teal fg:green)\
 $python\
 $rust\
 $golang\
 $nodejs\
+$java\
 $docker_context\
+[](bg:surface0 fg:teal)\
 $cmd_duration\
+$status\
+[](fg:surface0)\
+$fill\
+[](fg:surface0)\
+$time\
+[](fg:mauve bg:surface0)\
+$battery\
+[](fg:mauve)\
 $line_break\
 $character"""
+
+[os]
+disabled = false
+style = "bg:mauve fg:crust"
+[os.symbols]
+Fedora = " "
+Linux = " "
+Macos = " "
+Windows = " "
+
+[username]
+show_always = false
+style_user = "bg:mauve fg:crust"
+style_root = "bg:red fg:crust bold"
+format = '[ $user]($style)'
+
+[directory]
+style = "bg:blue fg:crust"
+format = "[ $path ]($style)"
+truncation_length = 3
+truncation_symbol = "…/"
+[directory.substitutions]
+"Documents" = "󰈙 "
+"Downloads" = " "
+"Music" = "󰎆 "
+"Pictures" = " "
+"Development" = "󰲋 "
+
+[git_branch]
+symbol = ""
+style = "bg:green fg:crust"
+format = '[ $symbol $branch ]($style)'
+
+[git_status]
+style = "bg:green fg:crust"
+format = '[$all_status$ahead_behind ]($style)'
+conflicted = " "
+ahead = "⇡${count} "
+behind = "⇣${count} "
+diverged = "⇕⇡${ahead_count}⇣${behind_count} "
+up_to_date = ""
+untracked = " "
+stashed = "󰏗 "
+modified = " "
+staged = " "
+renamed = "󰁕 "
+deleted = " "
+
+[python]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version(\($virtualenv\)) ]($style)'
+
+[rust]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version ]($style)'
+
+[golang]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version ]($style)'
+
+[nodejs]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version ]($style)'
+
+[java]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version ]($style)'
+
+[docker_context]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $context ]($style)'
+
+[cmd_duration]
+min_time = 2_000
+style = "bg:surface0 fg:text"
+format = '[ 󱎫 $duration ]($style)'
+
+[status]
+disabled = false
+style = "bg:surface0 fg:red"
+format = '[ $symbol$status ]($style)'
+symbol = " "
+
+[fill]
+symbol = " "
+
+[time]
+disabled = false
+time_format = "%H:%M"
+style = "bg:surface0 fg:subtext0"
+format = '[ 󰥔 $time ]($style)'
+
+[battery]
+disabled = true
 
 [character]
 success_symbol = "[❯](bold green)"
 error_symbol = "[❯](bold red)"
+vimcmd_symbol = "[❮](bold mauve)"
 
-[directory]
-truncation_length = 3
-truncation_symbol = "…/"
-
-[git_branch]
-symbol = " "
-
-[git_status]
-format = '([\[$all_status$ahead_behind\]]($style) )'
-
-[cmd_duration]
-min_time = 2_000
-format = "took [$duration](bold yellow) "
-
-[python]
-symbol = " "
-
-[rust]
-symbol = " "
-
-[golang]
-symbol = " "
-
-[nodejs]
-symbol = " "
-
-[docker_context]
-symbol = " "
+[palettes.catppuccin_mocha]
+rosewater = "#f5e0dc"
+flamingo  = "#f2cdcd"
+pink      = "#f5c2e7"
+mauve     = "#cba6f7"
+red       = "#f38ba8"
+maroon    = "#eba0ac"
+peach     = "#fab387"
+yellow    = "#f9e2af"
+green     = "#a6e3a1"
+teal      = "#94e2d5"
+sky       = "#89dceb"
+sapphire  = "#74c7ec"
+blue      = "#89b4fa"
+lavender  = "#b4befe"
+text      = "#cdd6f4"
+subtext1  = "#bac2de"
+subtext0  = "#a6adc8"
+overlay2  = "#9399b2"
+overlay1  = "#7f849c"
+overlay0  = "#6c7086"
+surface2  = "#585b70"
+surface1  = "#45475a"
+surface0  = "#313244"
+base      = "#1e1e2e"
+mantle    = "#181825"
+crust     = "#11111b"
 STAREOF
         log_success "Starship configuration created"
     else
@@ -683,6 +862,9 @@ install_packages() {
         
         # Shell and terminal
         fish kitty
+
+        # Modern CLI tools
+        eza bat
 
         # System utilities
         fastfetch solaar solaar-udev tldr
