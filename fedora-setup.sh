@@ -23,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.2.2"
+readonly SCRIPT_VERSION="1.2.3"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -393,16 +393,15 @@ setup_fish() {
 # Disable greeting
 set -g fish_greeting
 
-# Starship prompt
-if command -q starship
-    starship init fish | source
-end
-
 # Transient prompt — show minimal prompt for previous commands
 function starship_transient_prompt_func
     starship module character
 end
-enable_transient_prompt
+
+# Starship prompt (must be after transient prompt function definition)
+if command -q starship
+    starship init fish | source
+end
 
 # Modern CLI replacements
 if command -q eza
