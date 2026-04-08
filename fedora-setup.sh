@@ -3,6 +3,7 @@
 # Fedora Post-Installation Setup Script
 # 
 # This script automates the setup of a fresh Fedora installation with:
+# - Fish shell with Starship prompt and Kitty terminal
 # - Comprehensive font collection (Nerd Fonts, Google, Microsoft)
 # - RPM Fusion repositories (free, nonfree, and tainted)
 # - Essential system tools and applications
@@ -22,7 +23,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.1.7"
+readonly SCRIPT_VERSION="1.2.0"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -39,6 +40,16 @@ readonly DNF_DELTARPM=true
 
 # Desktop environment detection
 DESKTOP_ENV=""
+
+# Temporary files to clean up on exit
+TEMP_FILES=()
+
+cleanup() {
+    for f in "${TEMP_FILES[@]}"; do
+        rm -rf "$f" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT
 
 # ============================================================================
 # Utility Functions
@@ -180,7 +191,7 @@ detect_desktop_environment() {
 install_basic_packages() {
     log_section "Installing basic packages"
     
-    if sudo dnf -y install git unzip dnf5-plugins p7zip p7zip-plugins 2>&1 | tee -a "$LOG_FILE"; then
+    if sudo dnf -y install git unzip jq dnf5-plugins p7zip p7zip-plugins 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Basic packages installed"
     else
         log_error "Failed to install some basic packages (continuing anyway)"
@@ -200,10 +211,10 @@ install_nerd_font() {
     
     log "Downloading FiraCode Nerd Font..."
     if curl -fsSL -o "$temp_zip" "$FONT_ZIP_URL"; then
-        cd "$FONT_DIR"
+        pushd "$FONT_DIR" >/dev/null
         unzip -oq "$temp_zip" && rm -f "$temp_zip"
         fc-cache -f >/dev/null
-        cd - >/dev/null
+        popd >/dev/null
         log_success "FiraCode Nerd Font installed successfully"
     else
         log_error "Failed to download FiraCode Nerd Font"
@@ -235,109 +246,256 @@ install_system_fonts() {
     log_success "Font cache updated"
 }
 
-configure_terminal_font() {
-    log_section "Configuring terminal font"
-    
-    case "$DESKTOP_ENV" in
-        GNOME)
-            configure_ptyxis_font
-            ;;
-        KDE)
-            configure_konsole_font
-            ;;
-        *)
-            log "Unknown desktop environment, skipping terminal font configuration"
-            ;;
-    esac
-}
+configure_kitty() {
+    log_section "Configuring Kitty terminal"
 
-configure_ptyxis_font() {
-    log "Configuring Ptyxis (GNOME Terminal) font..."
-    
-    if ! command_exists gsettings; then
-        log "gsettings not available, skipping Ptyxis configuration"
-        return 0
-    fi
-    
-    local current_font
-    local use_system_font
-    
-    current_font=$(gsettings get org.gnome.Ptyxis font-name 2>/dev/null || echo "")
-    use_system_font=$(gsettings get org.gnome.Ptyxis use-system-font 2>/dev/null || echo "true")
-    
-    if [[ "$current_font" != "'$FONT_SETTINGS'" ]] || [[ "$use_system_font" != "false" ]]; then
-        gsettings set org.gnome.Ptyxis use-system-font false 2>&1 | tee -a "$LOG_FILE" || true
-        gsettings set org.gnome.Ptyxis font-name "$FONT_SETTINGS" 2>&1 | tee -a "$LOG_FILE" || true
-        log_success "Ptyxis font configured (restart terminal to apply)"
-    else
-        log_success "Ptyxis font already configured"
-    fi
-}
+    local kitty_conf_dir="$HOME/.config/kitty"
+    local kitty_conf="$kitty_conf_dir/kitty.conf"
 
-configure_konsole_font() {
-    log "Configuring Konsole (KDE Terminal) font..."
-    
-    local konsole_profile_dir="$HOME/.local/share/konsole"
-    local profile_file="$konsole_profile_dir/Profile.profile"
-    
-    # Create Konsole profile directory if it doesn't exist
-    mkdir -p "$konsole_profile_dir"
-    
-    # Check if custom profile exists
-    if [[ ! -f "$profile_file" ]]; then
-        log "Creating new Konsole profile..."
-        cat > "$profile_file" <<EOF
-[Appearance]
-ColorScheme=Breeze
-Font=FiraCode Nerd Font Mono,10,-1,5,50,0,0,0,0,0
+    mkdir -p "$kitty_conf_dir"
 
-[General]
-Name=Profile
-Parent=FALLBACK/
+    if [[ ! -f "$kitty_conf" ]]; then
+        log "Creating Kitty configuration..."
+        cat > "$kitty_conf" <<'EOF'
+# Font
+font_family      FiraCode Nerd Font Mono
+bold_font        auto
+italic_font      auto
+bold_italic_font auto
+font_size        10.0
+
+# Window
+window_padding_width 4
+hide_window_decorations yes
+confirm_os_window_close 0
+
+# Scrollback
+scrollback_lines 10000
+
+# Bell
+enable_audio_bell no
+
+# Theme (Catppuccin Mocha)
+foreground              #CDD6F4
+background              #1E1E2E
+selection_foreground     #1E1E2E
+selection_background     #F5E0DC
+cursor                  #F5E0DC
+cursor_text_color       #1E1E2E
+url_color               #F5E0DC
+
+# Black
+color0  #45475A
+color8  #585B70
+
+# Red
+color1  #F38BA8
+color9  #F38BA8
+
+# Green
+color2  #A6E3A1
+color10 #A6E3A1
+
+# Yellow
+color3  #F9E2AF
+color11 #F9E2AF
+
+# Blue
+color4  #89B4FA
+color12 #89B4FA
+
+# Magenta
+color5  #F5C2E7
+color13 #F5C2E7
+
+# Cyan
+color6  #94E2D5
+color14 #94E2D5
+
+# White
+color7  #BAC2DE
+color15 #A6ADC8
+
+# Tab bar
+active_tab_foreground   #11111B
+active_tab_background   #CBA6F7
+inactive_tab_foreground #CDD6F4
+inactive_tab_background #181825
+tab_bar_background      #11111B
+mark1_foreground        #1E1E2E
+mark1_background        #B4BEFE
+mark2_foreground        #1E1E2E
+mark2_background        #CBA6F7
+mark3_foreground        #1E1E2E
+mark3_background        #74C7EC
 EOF
-        log_success "Konsole profile created"
+        log_success "Kitty configuration created"
     else
-        # Update existing profile
-        if grep -q '^\[Appearance\]' "$profile_file"; then
-            if ! grep -q '^Font=FiraCode Nerd Font Mono' "$profile_file"; then
-                # Add or update Font line in [Appearance] section
-                sed -i '/^\[Appearance\]/a Font=FiraCode Nerd Font Mono,10,-1,5,50,0,0,0,0,0' "$profile_file"
-                log_success "Konsole font updated in existing profile"
+        log_success "Kitty configuration already exists"
+    fi
+
+    # Set kitty as default terminal on GNOME
+    if [[ "$DESKTOP_ENV" == "GNOME" ]] && command_exists gsettings; then
+        local kitty_desktop="kitty.desktop"
+        if [[ -f "/usr/share/applications/$kitty_desktop" ]]; then
+            gsettings set org.gnome.desktop.default-applications.terminal exec kitty 2>&1 | tee -a "$LOG_FILE" || true
+            log_success "Kitty set as default GNOME terminal"
+        fi
+    fi
+
+    # Set kitty as default terminal via xdg
+    if command_exists xdg-mime; then
+        xdg-mime default kitty.desktop x-scheme-handler/terminal 2>/dev/null || true
+    fi
+    if command_exists update-alternatives; then
+        sudo update-alternatives --set x-terminal-emulator "$(command -v kitty)" 2>/dev/null || true
+    fi
+
+    log_success "Kitty configured as default terminal"
+}
+
+setup_fish() {
+    log_section "Setting up Fish shell with Starship"
+
+    local fish_conf_dir="$HOME/.config/fish"
+    local fish_conf="$fish_conf_dir/config.fish"
+
+    mkdir -p "$fish_conf_dir"
+
+    # Create or update config.fish
+    if [[ ! -f "$fish_conf" ]]; then
+        log "Creating Fish configuration..."
+        cat > "$fish_conf" <<'FISHEOF'
+# Disable greeting
+set -g fish_greeting
+
+# Starship prompt
+if command -q starship
+    starship init fish | source
+end
+
+# Useful aliases
+alias ll='ls -lah'
+alias la='ls -A'
+alias ..='cd ..'
+alias ...='cd ../..'
+
+# System update
+alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids; or true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y'
+FISHEOF
+        log_success "Fish configuration created"
+    else
+        # Ensure starship init is present
+        if ! grep -q 'starship init fish' "$fish_conf"; then
+            cat >> "$fish_conf" <<'FISHEOF'
+
+# Starship prompt
+if command -q starship
+    starship init fish | source
+end
+FISHEOF
+            log_success "Starship init added to Fish config"
+        else
+            log_success "Starship already configured in Fish"
+        fi
+
+        # Ensure update alias is present
+        if ! grep -q "alias update=" "$fish_conf"; then
+            cat >> "$fish_conf" <<'FISHEOF'
+
+# System update
+alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids; or true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y'
+FISHEOF
+            log_success "Update alias added to Fish config"
+        fi
+    fi
+
+    # Configure Starship
+    local starship_conf="$HOME/.config/starship.toml"
+    if [[ ! -f "$starship_conf" ]]; then
+        log "Creating Starship configuration..."
+        cat > "$starship_conf" <<'STAREOF'
+# Starship prompt configuration
+format = """
+$username\
+$hostname\
+$directory\
+$git_branch\
+$git_status\
+$python\
+$rust\
+$golang\
+$nodejs\
+$docker_context\
+$cmd_duration\
+$line_break\
+$character"""
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"
+
+[directory]
+truncation_length = 3
+truncation_symbol = "…/"
+
+[git_branch]
+symbol = " "
+
+[git_status]
+format = '([\[$all_status$ahead_behind\]]($style) )'
+
+[cmd_duration]
+min_time = 2_000
+format = "took [$duration](bold yellow) "
+
+[python]
+symbol = " "
+
+[rust]
+symbol = " "
+
+[golang]
+symbol = " "
+
+[nodejs]
+symbol = " "
+
+[docker_context]
+symbol = " "
+STAREOF
+        log_success "Starship configuration created"
+    else
+        log_success "Starship configuration already exists"
+    fi
+
+    # Set fish as default shell
+    if command_exists fish; then
+        local fish_path
+        local current_shell
+
+        fish_path="$(command -v fish)"
+        current_shell="$(getent passwd "$USER" | cut -d: -f7 || echo "")"
+
+        # Ensure fish is in /etc/shells
+        if ! grep -qx "$fish_path" /etc/shells; then
+            echo "$fish_path" | sudo tee -a /etc/shells >> "$LOG_FILE" 2>&1
+            log_success "Fish added to /etc/shells"
+        fi
+
+        if [[ "$current_shell" != "$fish_path" ]]; then
+            log "Changing default shell to Fish..."
+            if chsh -s "$fish_path" 2>&1 | tee -a "$LOG_FILE"; then
+                log_success "Default shell changed to Fish (re-login to apply)"
             else
-                log_success "Konsole font already configured"
+                log_error "Failed to change default shell"
             fi
         else
-            # No [Appearance] section, add it
-            cat >> "$profile_file" <<EOF
-
-[Appearance]
-ColorScheme=Breeze
-Font=FiraCode Nerd Font Mono,10,-1,5,50,0,0,0,0,0
-EOF
-            log_success "Konsole font configured"
-        fi
-    fi
-    
-    # Set as default profile in konsolerc
-    local konsolerc="$HOME/.config/konsolerc"
-    if [[ -f "$konsolerc" ]]; then
-        if ! grep -q '^\[Desktop Entry\]' "$konsolerc"; then
-            echo "[Desktop Entry]" >> "$konsolerc"
-        fi
-        if grep -q '^DefaultProfile=' "$konsolerc"; then
-            sed -i 's|^DefaultProfile=.*|DefaultProfile=Profile.profile|' "$konsolerc"
-        else
-            sed -i '/^\[Desktop Entry\]/a DefaultProfile=Profile.profile' "$konsolerc"
+            log_success "Fish already set as default shell"
         fi
     else
-        mkdir -p "$(dirname "$konsolerc")"
-        cat > "$konsolerc" <<EOF
-[Desktop Entry]
-DefaultProfile=Profile.profile
-EOF
+        log_error "Fish not installed, skipping shell change"
     fi
-    
-    log_success "Konsole font configured (restart Konsole to apply)"
 }
 
 optimize_system() {
@@ -508,9 +666,12 @@ install_packages() {
         # Networking
         wireguard-tools wget
         
+        # Shell and terminal
+        fish kitty starship
+
         # System utilities
         fastfetch solaar solaar-udev tldr
-        
+
         # FUSE support
         fuse fuse-libs fuse3 fuse3-libs
         
@@ -608,7 +769,8 @@ setup_ledger_udev() {
     
     local temp_script
     temp_script="$(mktemp)"
-    
+    TEMP_FILES+=("$temp_script")
+
     log "Downloading Ledger udev rules script..."
     if curl -fsSL -o "$temp_script" https://raw.githubusercontent.com/LedgerHQ/udev-rules/master/add_udev_rules.sh 2>> "$LOG_FILE"; then
         log "Downloaded Ledger udev rules script, reviewing..."
@@ -652,8 +814,8 @@ download_third_party_apps() {
     log_section "Downloading third-party applications"
     
     mkdir -p "$PACKAGES_DIR"
-    cd "$PACKAGES_DIR"
-    
+    pushd "$PACKAGES_DIR" >/dev/null
+
     # Ledger Live
     log "Checking for Ledger Live updates..."
     local ledger_url
@@ -677,7 +839,7 @@ download_third_party_apps() {
     log "Checking for Tabby Terminal updates..."
     local tabby_url
     tabby_url=$(curl -s "https://api.github.com/repos/Eugeny/tabby/releases/latest" | \
-                grep -Eo '"browser_download_url":\s*"[^"]*linux-x64\.rpm"' | head -n 1 | cut -d '"' -f 4)
+                jq -r '[.assets[].browser_download_url | select(test("linux-x64\\.rpm$"))][0] // empty')
     
     if [[ -n "$tabby_url" ]]; then
         local tabby_file
@@ -699,7 +861,7 @@ download_third_party_apps() {
     log "Checking for Bruno updates..."
     local bruno_url
     bruno_url=$(curl -s "https://api.github.com/repos/usebruno/bruno/releases/latest" | \
-                grep -Eo '"browser_download_url":\s*"[^"]*_x86_64_linux\.rpm"' | head -n 1 | cut -d '"' -f 4)
+                jq -r '[.assets[].browser_download_url | select(test("_x86_64_linux\\.rpm$"))][0] // empty')
     
     if [[ -n "$bruno_url" ]]; then
         local bruno_file
@@ -721,8 +883,7 @@ download_third_party_apps() {
     log "Checking for Telegram Desktop updates..."
     local tg_url
     tg_url=$(curl -s "https://api.github.com/repos/telegramdesktop/tdesktop/releases/latest" | \
-             grep -Eo '"browser_download_url":\s*"[^"]*tsetup\.[0-9]+\.[0-9]+\.[0-9]+\.tar\.xz"' | \
-             head -n 1 | cut -d '"' -f 4)
+             jq -r '[.assets[].browser_download_url | select(test("tsetup\\.[0-9]+\\.[0-9]+\\.[0-9]+\\.tar\\.xz$"))][0] // empty')
     
     if [[ -n "$tg_url" ]]; then
         local tg_file
@@ -774,8 +935,7 @@ download_third_party_apps() {
     log "Checking for balenaEtcher updates..."
     local etcher_url
     etcher_url=$(curl -s "https://api.github.com/repos/balena-io/etcher/releases/latest" | \
-                 grep -Eo '"browser_download_url":\s*"[^"]*balenaEtcher-linux-x64-[0-9.]+\.zip"' | \
-                 cut -d '"' -f 4 | head -n 1)
+                 jq -r '[.assets[].browser_download_url | select(test("balenaEtcher-linux-x64-[0-9.]+\\.zip$"))][0] // empty')
     
     if [[ -n "$etcher_url" ]]; then
         local etcher_file
@@ -795,13 +955,13 @@ download_third_party_apps() {
 
     echo ""
     log_success "Third-party applications downloaded"
-    cd - >/dev/null
+    popd >/dev/null
 }
 
 install_third_party_apps() {
     log_section "Installing third-party applications"
     
-    cd "$PACKAGES_DIR"
+    pushd "$PACKAGES_DIR" >/dev/null
     mkdir -p "$APPS_DIR"
     
     # Install RPM packages
@@ -810,7 +970,7 @@ install_third_party_apps() {
         echo ""
         log "Installing RPM packages..."
         echo ""
-        if sudo rpm -Uvh --nodeps "${rpm_files[@]}"; then
+        if sudo dnf -y install "${rpm_files[@]}"; then
             echo "RPM packages installed successfully" >> "$LOG_FILE"
             echo ""
             log_success "RPM packages installed"
@@ -853,7 +1013,8 @@ install_third_party_apps() {
         log "Extracting balenaEtcher..."
         local temp_dir
         temp_dir=$(mktemp -d)
-        
+        TEMP_FILES+=("$temp_dir")
+
         if unzip -oq "${etcher_zips[0]}" -d "$temp_dir" 2>> "$LOG_FILE"; then
             rm -rf "$APPS_DIR/balenaEtcher"
             mkdir -p "$APPS_DIR/balenaEtcher"
@@ -875,22 +1036,8 @@ install_third_party_apps() {
         
         rm -rf "$temp_dir"
     fi
-    
-    cd - >/dev/null
-}
 
-create_update_alias() {
-    log_section "Creating update alias"
-
-    local update_alias="alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids || true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y'"
-
-    if [[ -f "$HOME/.bashrc" ]]; then
-        sed -i -E '/^[[:space:]]*alias[[:space:]]+update=/d' "$HOME/.bashrc" 2>/dev/null || true
-        printf '\n# System update alias\n%s\n' "$update_alias" >> "$HOME/.bashrc"
-        log_success "Update alias added to .bashrc"
-    else
-        log_error ".bashrc not found, skipping alias creation"
-    fi
+    popd >/dev/null
 }
 
 # ============================================================================
@@ -918,10 +1065,7 @@ main() {
     
     # System fonts installation (requires tainted repo for msttcorefonts)
     install_system_fonts
-    
-    # Terminal font configuration
-    configure_terminal_font
-    
+
     # System optimization
     optimize_system
     disable_software_autostart
@@ -938,8 +1082,9 @@ main() {
     download_third_party_apps
     install_third_party_apps
 
-    # Final configuration
-    create_update_alias
+    # Shell and terminal setup
+    configure_kitty
+    setup_fish
 
     log_section "Setup Complete!"
     log "Log file saved to: $LOG_FILE"
@@ -947,14 +1092,19 @@ main() {
     log "Detected desktop environment: $DESKTOP_ENV"
     log ""
     log "Next steps:"
-    log "  1. Close this terminal and open a new one (or log out and back in)"
-    log "  2. Verify installed commands work:"
-    log "     - Run: which zed"
-    log "     - Run: zed --version"
+    log "  1. Log out and log back in (new default shell: Fish)"
+    log "  2. Open Kitty terminal — it is now the default"
+    log "  3. Verify setup: starship, zed --version, kitty --version"
+    log "  4. Use 'update' command anytime to update your system"
+    log ""
+    log "Shell and terminal:"
+    log "  - Shell: Fish with Starship prompt"
+    log "  - Terminal: Kitty (Catppuccin Mocha theme)"
+    log "  - Font: FiraCode Nerd Font Mono"
     log ""
     log "Installed applications:"
     log "  - Editors: Zed"
-    log "  - Terminal: Tabby"
+    log "  - Terminal: Kitty, Tabby"
     log "  - Development: Bruno API Client"
     log "  - Communication: Telegram, Zoom"
     log "  - Utilities: Ledger Live, WinBox, balenaEtcher"
