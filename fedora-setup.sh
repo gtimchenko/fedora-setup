@@ -3,12 +3,11 @@
 # Fedora Post-Installation Setup Script
 # 
 # This script automates the setup of a fresh Fedora installation with:
-# - ZSH with Oh My Zsh and Powerlevel10k theme
-# - Comprehensive font collection (Nerd Fonts, Google, Microsoft, Apple)
+# - Comprehensive font collection (Nerd Fonts, Google, Microsoft)
 # - RPM Fusion repositories (free, nonfree, and tainted)
 # - Essential system tools and applications
 # - Performance optimizations
-# - Third-party applications (Chrome, 1Password, VS Code, Zed, etc.)
+# - Third-party applications (Chrome, 1Password, Zed, etc.)
 # - Desktop environment detection (GNOME/KDE)
 #
 # Usage: ./fedora-setup.sh
@@ -23,7 +22,7 @@ set -Eeuo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.1.6"
+readonly SCRIPT_VERSION="1.1.7"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -181,7 +180,7 @@ detect_desktop_environment() {
 install_basic_packages() {
     log_section "Installing basic packages"
     
-    if sudo dnf -y install git zsh unzip dnf5-plugins p7zip p7zip-plugins 2>&1 | tee -a "$LOG_FILE"; then
+    if sudo dnf -y install git unzip dnf5-plugins p7zip p7zip-plugins 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Basic packages installed"
     else
         log_error "Failed to install some basic packages (continuing anyway)"
@@ -230,80 +229,7 @@ install_system_fonts() {
     else
         log_error "Some base fonts failed to install (continuing anyway)"
     fi
-    
-    # Apple Fonts (SF Pro, SF Compact, SF Mono, New York)
-    echo ""
-    log "Installing Apple fonts (SF Pro / Compact / Mono / New York)..."
-    
-    local apple_dst="/usr/share/fonts/apple"
-    
-    # Check if fonts already installed
-    if [[ -d "$apple_dst" ]] && [[ -n "$(find "$apple_dst" -name '*.otf' -o -name '*.ttf' 2>/dev/null)" ]]; then
-        log_success "Apple fonts already installed"
-    else
-        sudo mkdir -p "$apple_dst"
-        local tmp_dir
-        tmp_dir=$(mktemp -d)
-        
-        pushd "$tmp_dir" >/dev/null 2>&1 || exit 1
-        
-        local apple_urls=(
-            "https://devimages-cdn.apple.com/design/resources/download/SF-Pro.dmg"
-            "https://devimages-cdn.apple.com/design/resources/download/SF-Compact.dmg"
-            "https://devimages-cdn.apple.com/design/resources/download/SF-Mono.dmg"
-            "https://devimages-cdn.apple.com/design/resources/download/NY.dmg"
-        )
-        
-        for url in "${apple_urls[@]}"; do
-            local file
-            file=$(basename "$url")
-            log "  Downloading $file..."
-            
-            if ! curl -fsSLO "$url"; then
-                log_error "  Failed to download $file, skipping"
-                continue
-            fi
-            
-            log "  Extracting $file..."
-            if ! 7z x "$file" -y >/dev/null 2>&1; then
-                log_error "  Failed to extract $file, skipping"
-                continue
-            fi
-            
-            # Extract .pkg files
-            for pkg in *.pkg; do
-                [[ -f "$pkg" ]] || continue
-                log "    Extracting $pkg..."
-                7z x "$pkg" -y >/dev/null 2>&1 || true
-            done
-            
-            # Extract Payload/payload
-            shopt -s nullglob
-            for payload in Payload* payload*; do
-                log "      Extracting $payload..."
-                7z x "$payload" -y >/dev/null 2>&1 || true
-            done
-            shopt -u nullglob
-        done
-        
-        log "  Copying font files to $apple_dst..."
-        shopt -s globstar nullglob
-        local font_count=0
-        for f in **/*.ttf **/*.otf; do
-            sudo cp -n "$f" "$apple_dst/" 2>/dev/null && ((font_count++)) || true
-        done
-        shopt -u globstar nullglob
-        
-        popd >/dev/null 2>&1 || exit 1
-        rm -rf "$tmp_dir"
-        
-        if [[ $font_count -gt 0 ]]; then
-            log_success "Apple fonts installed ($font_count files)"
-        else
-            log_error "No Apple fonts were extracted"
-        fi
-    fi
-    
+
     log "Updating font cache..."
     sudo fc-cache -f >/dev/null 2>&1 || true
     log_success "Font cache updated"
@@ -412,81 +338,6 @@ EOF
     fi
     
     log_success "Konsole font configured (restart Konsole to apply)"
-}
-
-setup_zsh() {
-    log_section "Setting up ZSH with Oh My Zsh and Powerlevel10k"
-    
-    # Install Oh My Zsh
-    if [[ ! -d "${ZSH:-$HOME/.oh-my-zsh}" ]]; then
-        log "Installing Oh My Zsh..."
-        CHSH=no RUNZSH=no KEEP_ZSHRC=yes \
-            sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" 2>&1 | tee -a "$LOG_FILE" || true
-        log_success "Oh My Zsh installed"
-    else
-        log_success "Oh My Zsh already installed"
-    fi
-    
-    # Install Powerlevel10k theme
-    local theme_dir="${ZSH_CUSTOM:-${ZSH:-$HOME/.oh-my-zsh}/custom}/themes/powerlevel10k"
-    
-    if [[ ! -d "$theme_dir" ]]; then
-        log "Installing Powerlevel10k theme..."
-        git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$theme_dir" 2>&1 | tee -a "$LOG_FILE" || true
-        log_success "Powerlevel10k installed"
-    else
-        log "Updating Powerlevel10k theme..."
-        git -C "$theme_dir" pull --ff-only 2>&1 | tee -a "$LOG_FILE" || true
-        log_success "Powerlevel10k updated"
-    fi
-    
-    # Configure .zshrc
-    if [[ -f "$HOME/.zshrc" ]]; then
-        if grep -q '^ZSH_THEME=' "$HOME/.zshrc"; then
-            if ! grep -q '^ZSH_THEME="powerlevel10k/powerlevel10k"' "$HOME/.zshrc"; then
-                sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' "$HOME/.zshrc"
-                log_success "ZSH theme updated in .zshrc"
-            fi
-        else
-            printf '\nZSH_THEME="powerlevel10k/powerlevel10k"\n' >> "$HOME/.zshrc"
-            log_success "ZSH theme added to .zshrc"
-        fi
-        
-        if ! grep -q '\[\[.*~/.p10k\.zsh.*\]\].*source' "$HOME/.zshrc"; then
-            printf '\n[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh\n' >> "$HOME/.zshrc"
-        fi
-        
-        if [[ -f "$HOME/.p10k.zsh" ]] && ! grep -q '^POWERLEVEL10K_DISABLE_CONFIGURATION_WIZARD=' "$HOME/.zshrc"; then
-            printf '\nPOWERLEVEL10K_DISABLE_CONFIGURATION_WIZARD=true\n' >> "$HOME/.zshrc"
-        fi
-    fi
-}
-
-change_default_shell() {
-    log_section "Setting ZSH as default shell"
-    
-    if ! command_exists zsh; then
-        log_error "ZSH not installed, skipping shell change"
-        return 1
-    fi
-    
-    local zsh_path
-    local current_shell
-    
-    zsh_path="$(command -v zsh)"
-    current_shell="$(getent passwd "$USER" | cut -d: -f7 || echo "")"
-    
-    if [[ "$current_shell" != "$zsh_path" ]]; then
-        log "Changing default shell to ZSH..."
-        if chsh -s "$zsh_path" 2>&1 | tee -a "$LOG_FILE"; then
-            log_success "Default shell changed to ZSH (re-login to apply)"
-        else
-            log_error "Failed to change default shell"
-            return 1
-        fi
-    else
-        log_success "ZSH already set as default shell"
-    fi
 }
 
 optimize_system() {
@@ -723,12 +574,10 @@ install_flatpaks() {
     local flatpak_apps=(
         com.spotify.Client
         com.termius.Termius
-        net.cozic.joplin_desktop
         us.zoom.Zoom
         it.mijorus.gearlever
         io.github.kolunmi.Bazaar
         me.proton.Mail
-        org.gnome.World.PikaBackup
     )
     
     # Add GNOME-specific apps
@@ -943,26 +792,7 @@ download_third_party_apps() {
             log "balenaEtcher already downloaded"
         fi
     fi
-    
-    # Visual Studio Code
-    log "Checking for Visual Studio Code updates..."
-    local vsc_url
-    vsc_url=$(curl -s -L -w '%{url_effective}' -o /dev/null "https://code.visualstudio.com/sha/download?build=stable&os=linux-rpm-x64")
-    local vsc_file
-    vsc_file=$(basename "$vsc_url")
-    
-    if [[ -n "$vsc_file" ]] && [[ ! -f "$vsc_file" ]]; then
-        log "Downloading Visual Studio Code..."
-        find . -maxdepth 1 -name "code-*.rpm" -delete
-        if wget --show-progress "$vsc_url" 2>&1; then
-            echo "Visual Studio Code downloaded: $vsc_file" >> "$LOG_FILE"
-        else
-            log_error "Failed to download VS Code"
-        fi
-    else
-        log "Visual Studio Code already downloaded"
-    fi
-    
+
     echo ""
     log_success "Third-party applications downloaded"
     cd - >/dev/null
@@ -1049,93 +879,17 @@ install_third_party_apps() {
     cd - >/dev/null
 }
 
-configure_zsh_paths() {
-    log_section "Configuring ZSH paths for installed applications"
-    
-    if [[ ! -f "$HOME/.zshrc" ]]; then
-        log_warning ".zshrc not found, skipping path configuration"
-        return 1
-    fi
-    
-    # Remove old PATH configurations if they exist
-    sed -i '/# Application paths added by fedora-setup/,/# End application paths/d' "$HOME/.zshrc" 2>/dev/null || true
-    
-    # Add comprehensive PATH configuration
-    cat >> "$HOME/.zshrc" <<'EOF'
-
-# Application paths added by fedora-setup
-# User local binaries (common location for many installers including Zed)
-[[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"
-
-# User bin directory
-[[ -d "$HOME/bin" ]] && export PATH="$HOME/bin:$PATH"
-
-# User applications
-[[ -d "$HOME/Applications" ]] && export PATH="$HOME/Applications:$PATH"
-
-# Cargo (Rust) binaries
-[[ -d "$HOME/.cargo/bin" ]] && export PATH="$HOME/.cargo/bin:$PATH"
-
-# End application paths
-EOF
-    
-    log_success "ZSH paths configured for installed applications"
-}
-
-sync_bash_to_zsh_paths() {
-    log_section "Syncing PATH modifications from bash to zsh"
-    
-    if [[ ! -f "$HOME/.bashrc" ]] || [[ ! -f "$HOME/.zshrc" ]]; then
-        log_warning "Required profile files not found"
-        return 1
-    fi
-    
-    # Extract PATH modifications from .bashrc that were added recently
-    local bashrc_paths
-    bashrc_paths=$(grep -E '^export PATH=|^PATH=' "$HOME/.bashrc" 2>/dev/null | tail -5 || true)
-    
-    if [[ -n "$bashrc_paths" ]]; then
-        # Check if we need to add these paths (avoid duplicates)
-        local needs_sync=false
-        while IFS= read -r path_line; do
-            if ! grep -qF "$path_line" "$HOME/.zshrc" 2>/dev/null; then
-                needs_sync=true
-                break
-            fi
-        done <<< "$bashrc_paths"
-        
-        if [[ "$needs_sync" == "true" ]]; then
-            # Remove old synced paths
-            sed -i '/# Synced from bashrc by fedora-setup/,/# End synced paths/d' "$HOME/.zshrc" 2>/dev/null || true
-            
-            # Add new paths
-            {
-                echo ""
-                echo "# Synced from bashrc by fedora-setup"
-                echo "$bashrc_paths"
-                echo "# End synced paths"
-            } >> "$HOME/.zshrc"
-            
-            log_success "PATH modifications synced from bash to zsh"
-        else
-            log_success "All bash paths already present in zsh"
-        fi
-    else
-        log "No PATH modifications found in .bashrc"
-    fi
-}
-
 create_update_alias() {
     log_section "Creating update alias"
-    
+
     local update_alias="alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids || true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y'"
-    
-    if [[ -f "$HOME/.zshrc" ]]; then
-        sed -i -E '/^[[:space:]]*alias[[:space:]]+update=/d' "$HOME/.zshrc" 2>/dev/null || true
-        printf '\n# System update alias\n%s\n' "$update_alias" >> "$HOME/.zshrc"
-        log_success "Update alias added to .zshrc"
+
+    if [[ -f "$HOME/.bashrc" ]]; then
+        sed -i -E '/^[[:space:]]*alias[[:space:]]+update=/d' "$HOME/.bashrc" 2>/dev/null || true
+        printf '\n# System update alias\n%s\n' "$update_alias" >> "$HOME/.bashrc"
+        log_success "Update alias added to .bashrc"
     else
-        log_error ".zshrc not found, skipping alias creation"
+        log_error ".bashrc not found, skipping alias creation"
     fi
 }
 
@@ -1168,10 +922,6 @@ main() {
     # Terminal font configuration
     configure_terminal_font
     
-    # Shell setup
-    setup_zsh
-    change_default_shell
-    
     # System optimization
     optimize_system
     disable_software_autostart
@@ -1187,49 +937,33 @@ main() {
     install_zed_editor
     download_third_party_apps
     install_third_party_apps
-    
-    # Configure ZSH paths AFTER all installations are complete
-    configure_zsh_paths
-    sync_bash_to_zsh_paths
-    
+
     # Final configuration
     create_update_alias
-    
+
     log_section "Setup Complete!"
     log "Log file saved to: $LOG_FILE"
     log ""
     log "Detected desktop environment: $DESKTOP_ENV"
     log ""
-    log "⚠️  IMPORTANT: Terminal Configuration Required"
-    log ""
     log "Next steps:"
-    log "  1. **CRITICAL**: Close this terminal and open a NEW terminal"
-    log "     (or run: exec zsh)"
+    log "  1. Close this terminal and open a new one (or log out and back in)"
     log "  2. Verify installed commands work:"
     log "     - Run: which zed"
     log "     - Run: zed --version"
-    log "  3. If commands still don't work, log out and log back in"
-    log "  4. Use 'update' command anytime to update your system"
-    log ""
-    log "Why this is needed:"
-    log "  This script was run in bash, but your default shell is now zsh."
-    log "  Applications like Zed add themselves to PATH during installation."
-    log "  You need a fresh shell session for the new PATH to take effect."
     log ""
     log "Installed applications:"
-    log "  - Editors: VS Code, Zed"
+    log "  - Editors: Zed"
     log "  - Terminal: Tabby"
     log "  - Development: Bruno API Client"
     log "  - Communication: Telegram, Zoom"
     log "  - Utilities: Ledger Live, WinBox, balenaEtcher"
-    log "  - Notes: Joplin"
-    log "  - Flatpaks: Bazaar, Proton Mail, PikaBackup, and more"
+    log "  - Flatpaks: Bazaar, Proton Mail, Spotify, and more"
     log ""
     log "Installed fonts:"
     log "  - FiraCode Nerd Font"
     log "  - Google Noto (Sans, Mono, Emoji)"
     log "  - DejaVu, Liberation, Inter, Terminus"
-    log "  - Apple fonts (SF Pro, SF Compact, SF Mono, New York)"
     log ""
     log "All done! Enjoy your Fedora setup!"
 }
