@@ -3,8 +3,8 @@
 # Fedora Post-Installation Setup Script
 # 
 # This script automates the setup of a fresh Fedora installation with:
-# - Fish shell with Starship prompt and Kitty terminal
-# - Comprehensive font collection (Nerd Fonts, Google, Microsoft)
+# - Fish shell with Starship prompt
+# - Font collection (FiraCode Nerd Font, Noto, DejaVu, Liberation, Inter)
 # - RPM Fusion repositories (free, nonfree, and tainted)
 # - Essential system tools and applications
 # - Performance optimizations
@@ -17,13 +17,13 @@
 # License: MIT
 # Repository: https://github.com/gtimchenko/fedora-setup
 
-set -Eeuo pipefail
+set -euo pipefail
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.2.3"
+readonly SCRIPT_VERSION="1.3.0"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -31,12 +31,10 @@ readonly FONT_DIR="$HOME/.local/share/fonts"
 
 # Font configuration
 readonly FONT_NAME="FiraCode Nerd Font Mono"
-readonly FONT_SETTINGS="FiraCode Nerd Font Mono weight=450 10"
 readonly FONT_ZIP_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest/download/FiraCode.zip"
 
 # DNF configuration
 readonly DNF_MAX_PARALLEL=10
-readonly DNF_DELTARPM=true
 
 # Desktop environment detection
 DESKTOP_ENV=""
@@ -44,10 +42,16 @@ DESKTOP_ENV=""
 # Temporary files to clean up on exit
 TEMP_FILES=()
 
+# Background process keeping the sudo timestamp fresh
+SUDO_KEEPALIVE_PID=""
+
 cleanup() {
     for f in "${TEMP_FILES[@]}"; do
         rm -rf "$f" 2>/dev/null || true
     done
+    if [[ -n "$SUDO_KEEPALIVE_PID" ]]; then
+        kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
@@ -67,12 +71,22 @@ log_success() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] ✓ $*" | tee -a "$LOG_FILE"
 }
 
+# Colored output on the terminal, plain text in the log file
+log_colored() {
+    local color="$1"
+    shift
+    local msg
+    msg="[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+    printf '\033[%sm%s\033[0m\n' "$color" "$msg"
+    echo "$msg" >> "$LOG_FILE"
+}
+
 log_warning() {
-    echo -e "\033[1;33m[$(date +'%Y-%m-%d %H:%M:%S')] ⚠ $*\033[0m" | tee -a "$LOG_FILE"
+    log_colored "1;33" "⚠ $*"
 }
 
 log_critical() {
-    echo -e "\033[1;31m[$(date +'%Y-%m-%d %H:%M:%S')] ✗ $*\033[0m" | tee -a "$LOG_FILE"
+    log_colored "1;31" "✗ $*"
 }
 
 log_section() {
@@ -91,6 +105,27 @@ check_fedora() {
         log_error "This script is designed for Fedora. Exiting."
         exit 1
     fi
+}
+
+check_not_root() {
+    if [[ $EUID -eq 0 ]]; then
+        log_error "Do not run this script as root or via sudo; run it as your regular user. Exiting."
+        exit 1
+    fi
+}
+
+# Ask for the sudo password once and keep the timestamp fresh until the script exits
+start_sudo_keepalive() {
+    if ! sudo -v; then
+        log_error "sudo access is required. Exiting."
+        exit 1
+    fi
+    while true; do
+        sudo -n true 2>/dev/null || exit
+        sleep 60
+        kill -0 "$$" 2>/dev/null || exit
+    done &
+    SUDO_KEEPALIVE_PID=$!
 }
 
 initial_system_update() {
@@ -122,29 +157,31 @@ initial_system_update() {
     log "Checking if reboot is required..."
     
     local needs_reboot=false
-    
-    # Check for kernel updates
-    if [[ "$(uname -r)" != "$(rpm -q --last kernel | head -1 | awk '{print $1}' | sed 's/kernel-//')" ]]; then
-        log_warning "Kernel has been updated"
+
+    # dnf5 needs-restarting (dnf5-plugins) checks kernel, glibc, systemd and other core packages.
+    # Run it as root: root's metadata cache is fresh after the upgrade above. Exit code 1 is
+    # returned both for "reboot required" and for errors, so the output is checked too.
+    local nr_output=""
+    local nr_status=0
+    nr_output="$(sudo dnf needs-restarting -r 2>&1)" || nr_status=$?
+    echo "$nr_output" >> "$LOG_FILE"
+
+    if [[ $nr_status -eq 0 ]]; then
+        log_success "No reboot required by dnf needs-restarting"
+    elif [[ "$nr_output" == *"Reboot is required"* ]]; then
+        log_warning "Reboot required according to dnf needs-restarting"
         needs_reboot=true
-    fi
-    
-    # Check using needs-restarting if available
-    if command_exists needs-restarting; then
-        if needs-restarting -r &>/dev/null; then
-            log_success "No reboot required by needs-restarting"
-        else
-            log_warning "Reboot required according to needs-restarting"
+    else
+        log_warning "dnf needs-restarting failed, falling back to kernel version check"
+        # Fallback: compare the running kernel with the newest installed one
+        local latest_kernel
+        latest_kernel="$(rpm -q --last kernel-core 2>/dev/null | awk 'NR == 1 {sub(/^kernel-core-/, "", $1); print $1}' || true)"
+        if [[ -n "$latest_kernel" ]] && [[ "$(uname -r)" != "$latest_kernel" ]]; then
+            log_warning "Kernel has been updated"
             needs_reboot=true
         fi
     fi
-    
-    # Check for systemd or glibc updates (always require reboot)
-    if sudo dnf list --installed 2>/dev/null | grep -E "^(systemd|glibc)" | grep -q "@updates"; then
-        log_warning "Critical system packages (systemd/glibc) were updated"
-        needs_reboot=true
-    fi
-    
+
     if [[ "$needs_reboot" == "true" ]]; then
         echo ""
         echo ""
@@ -191,7 +228,7 @@ detect_desktop_environment() {
 install_basic_packages() {
     log_section "Installing basic packages"
     
-    if sudo dnf -y install git unzip jq dnf5-plugins p7zip p7zip-plugins 2>&1 | tee -a "$LOG_FILE"; then
+    if sudo dnf -y install --skip-unavailable git unzip jq dnf5-plugins 7zip 7zip-standalone 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Basic packages installed"
     else
         log_error "Failed to install some basic packages (continuing anyway)"
@@ -211,15 +248,16 @@ install_nerd_font() {
     
     log "Downloading FiraCode Nerd Font..."
     if curl -fsSL -o "$temp_zip" "$FONT_ZIP_URL"; then
-        pushd "$FONT_DIR" >/dev/null
-        unzip -oq "$temp_zip" && rm -f "$temp_zip"
-        fc-cache -f >/dev/null
-        popd >/dev/null
-        log_success "FiraCode Nerd Font installed successfully"
+        if unzip -oq "$temp_zip" -d "$FONT_DIR"; then
+            fc-cache -f >/dev/null || true
+            log_success "FiraCode Nerd Font installed successfully"
+        else
+            log_error "Failed to extract FiraCode Nerd Font"
+        fi
     else
         log_error "Failed to download FiraCode Nerd Font"
-        return 1
     fi
+    rm -f "$temp_zip"
 }
 
 install_system_fonts() {
@@ -227,7 +265,7 @@ install_system_fonts() {
     
     # Base recommended fonts
     log "Installing base recommended fonts..."
-    if sudo dnf -y install \
+    if sudo dnf -y install --skip-unavailable \
         google-noto-sans-fonts \
         google-noto-sans-mono-fonts \
         google-noto-emoji-fonts \
@@ -244,138 +282,6 @@ install_system_fonts() {
     log "Updating font cache..."
     sudo fc-cache -f >/dev/null 2>&1 || true
     log_success "Font cache updated"
-}
-
-configure_kitty() {
-    log_section "Configuring Kitty terminal"
-
-    local kitty_conf_dir="$HOME/.config/kitty"
-    local kitty_conf="$kitty_conf_dir/kitty.conf"
-
-    mkdir -p "$kitty_conf_dir"
-
-    if [[ ! -f "$kitty_conf" ]]; then
-        log "Creating Kitty configuration..."
-        cat > "$kitty_conf" <<'EOF'
-# Font
-font_family      FiraCode Nerd Font Mono
-bold_font        auto
-italic_font      auto
-bold_italic_font auto
-font_size        10.0
-disable_ligatures never
-
-# Cursor
-cursor_shape          beam
-cursor_beam_thickness 1.5
-cursor_blink_interval 0.5
-cursor_stop_blinking_after 15.0
-
-# Window
-remember_window_size  no
-initial_window_width  160c
-initial_window_height 45c
-window_padding_width  6 8
-placement_strategy    center
-hide_window_decorations no
-confirm_os_window_close 0
-background_opacity    0.95
-
-# Scrollback
-scrollback_lines 10000
-
-# Bell
-enable_audio_bell no
-
-# URL
-url_style curly
-detect_urls yes
-
-# Tab bar
-tab_bar_edge        top
-tab_bar_style       powerline
-tab_powerline_style slanted
-tab_title_template  " {index}: {title} "
-
-# Theme (Catppuccin Mocha)
-foreground              #CDD6F4
-background              #1E1E2E
-selection_foreground     #1E1E2E
-selection_background     #F5E0DC
-cursor                  #F5E0DC
-cursor_text_color       #1E1E2E
-url_color               #89B4FA
-
-# Black
-color0  #45475A
-color8  #585B70
-
-# Red
-color1  #F38BA8
-color9  #F38BA8
-
-# Green
-color2  #A6E3A1
-color10 #A6E3A1
-
-# Yellow
-color3  #F9E2AF
-color11 #F9E2AF
-
-# Blue
-color4  #89B4FA
-color12 #89B4FA
-
-# Magenta
-color5  #F5C2E7
-color13 #F5C2E7
-
-# Cyan
-color6  #94E2D5
-color14 #94E2D5
-
-# White
-color7  #BAC2DE
-color15 #A6ADC8
-
-# Tab bar colors
-active_tab_foreground   #11111B
-active_tab_background   #CBA6F7
-inactive_tab_foreground #CDD6F4
-inactive_tab_background #181825
-tab_bar_background      #11111B
-
-# Marks
-mark1_foreground #1E1E2E
-mark1_background #B4BEFE
-mark2_foreground #1E1E2E
-mark2_background #CBA6F7
-mark3_foreground #1E1E2E
-mark3_background #74C7EC
-EOF
-        log_success "Kitty configuration created"
-    else
-        log_success "Kitty configuration already exists"
-    fi
-
-    # Set kitty as default terminal on GNOME
-    if [[ "$DESKTOP_ENV" == "GNOME" ]] && command_exists gsettings; then
-        local kitty_desktop="kitty.desktop"
-        if [[ -f "/usr/share/applications/$kitty_desktop" ]]; then
-            gsettings set org.gnome.desktop.default-applications.terminal exec kitty 2>&1 | tee -a "$LOG_FILE" || true
-            log_success "Kitty set as default GNOME terminal"
-        fi
-    fi
-
-    # Set kitty as default terminal via xdg
-    if command_exists xdg-mime; then
-        xdg-mime default kitty.desktop x-scheme-handler/terminal 2>/dev/null || true
-    fi
-    if command_exists update-alternatives; then
-        sudo update-alternatives --set x-terminal-emulator "$(command -v kitty)" 2>/dev/null || true
-    fi
-
-    log_success "Kitty configured as default terminal"
 }
 
 setup_fish() {
@@ -398,9 +304,10 @@ function starship_transient_prompt_func
     starship module character
 end
 
-# Starship prompt (must be after transient prompt function definition)
+# Starship prompt with transient prompt enabled
 if command -q starship
     starship init fish | source
+    enable_transience
 end
 
 # Modern CLI replacements
@@ -435,9 +342,6 @@ abbr -a gco 'git checkout'
 abbr -a gb 'git branch'
 abbr -a glog 'git log --oneline --graph --decorate'
 
-# System update
-alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids; or true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y'
-
 # Colored man pages
 set -gx LESS_TERMCAP_mb \e'[1;31m'
 set -gx LESS_TERMCAP_md \e'[1;34m'
@@ -453,9 +357,10 @@ FISHEOF
         if ! grep -q 'starship init fish' "$fish_conf"; then
             cat >> "$fish_conf" <<'FISHEOF'
 
-# Starship prompt
+# Starship prompt with transient prompt enabled
 if command -q starship
     starship init fish | source
+    enable_transience
 end
 FISHEOF
             log_success "Starship init added to Fish config"
@@ -463,15 +368,25 @@ FISHEOF
             log_success "Starship already configured in Fish"
         fi
 
-        # Ensure update alias is present
-        if ! grep -q "alias update=" "$fish_conf"; then
+        # Ensure transient prompt is enabled (configs created by older versions lack it)
+        if ! grep -q 'enable_transience' "$fish_conf"; then
             cat >> "$fish_conf" <<'FISHEOF'
+
+# Starship transient prompt
+functions -q enable_transience; and enable_transience
+FISHEOF
+            log_success "Starship transient prompt enabled in Fish config"
+        fi
+    fi
+
+    # Ensure update alias is present
+    if ! grep -q "alias update=" "$fish_conf"; then
+        cat >> "$fish_conf" <<'FISHEOF'
 
 # System update
 alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids; or true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y'
 FISHEOF
-            log_success "Update alias added to Fish config"
-        fi
+        log_success "Update alias added to Fish config"
     fi
 
     # Install Starship
@@ -701,9 +616,11 @@ optimize_system() {
     
     # Configure DNF for better performance
     if command_exists dnf5; then
-        sudo dnf5 config-manager setopt max_parallel_downloads="$DNF_MAX_PARALLEL" 2>&1 | tee -a "$LOG_FILE" || true
-        sudo dnf5 config-manager setopt deltarpm="$DNF_DELTARPM" 2>&1 | tee -a "$LOG_FILE" || true
-        log_success "DNF5 configured"
+        if sudo dnf5 config-manager setopt max_parallel_downloads="$DNF_MAX_PARALLEL" 2>&1 | tee -a "$LOG_FILE"; then
+            log_success "DNF5 configured (max_parallel_downloads=$DNF_MAX_PARALLEL)"
+        else
+            log_error "Failed to configure DNF5"
+        fi
     fi
     
     # Enable SSD TRIM
@@ -716,53 +633,48 @@ optimize_system() {
         log_success "Firmware update timer enabled"
     fi
     
-    # Disable NetworkManager wait online (faster boot)
-    if sudo systemctl disable NetworkManager-wait-online.service >/dev/null 2>&1; then
+    # Disable NetworkManager wait online (faster boot), unless network filesystems
+    # in fstab rely on it being online at boot
+    if grep -Eq '^[^#]*[[:space:]](nfs4?|cifs|smb3|sshfs|fuse\.sshfs)[[:space:]]|^[^#]*_netdev' /etc/fstab 2>/dev/null; then
+        log_warning "Network filesystems found in /etc/fstab, keeping NetworkManager-wait-online enabled"
+    elif sudo systemctl disable NetworkManager-wait-online.service >/dev/null 2>&1; then
         log_success "NetworkManager wait-online disabled"
     fi
 }
 
+# Hide a system autostart entry for the current user via ~/.config/autostart override
+disable_autostart_entry() {
+    local desktop_file="$1"
+    local label="$2"
+    local system_file="/etc/xdg/autostart/$desktop_file"
+    local autostart_file="$HOME/.config/autostart/$desktop_file"
+
+    [[ -f "$system_file" ]] || return 0
+
+    if [[ ! -f "$autostart_file" ]]; then
+        cp "$system_file" "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
+    fi
+
+    if grep -q '^Hidden=' "$autostart_file" 2>/dev/null; then
+        sed -i 's/^Hidden=.*/Hidden=true/' "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
+    else
+        printf '\nHidden=true\n' >> "$autostart_file"
+    fi
+
+    log_success "$label autostart disabled"
+}
+
 disable_software_autostart() {
     log_section "Disabling software store autostart"
-    
+
     mkdir -p "$HOME/.config/autostart"
-    
+
     case "$DESKTOP_ENV" in
         GNOME)
-            # Disable GNOME Software
-            if [[ -f /etc/xdg/autostart/org.gnome.Software.desktop ]]; then
-                local autostart_file="$HOME/.config/autostart/org.gnome.Software.desktop"
-                
-                if [[ ! -f "$autostart_file" ]]; then
-                    cp /etc/xdg/autostart/org.gnome.Software.desktop "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
-                fi
-                
-                if grep -q '^Hidden=' "$autostart_file" 2>/dev/null; then
-                    sed -i 's/^Hidden=.*/Hidden=true/' "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
-                else
-                    printf '\nHidden=true\n' >> "$autostart_file"
-                fi
-                
-                log_success "GNOME Software autostart disabled"
-            fi
+            disable_autostart_entry org.gnome.Software.desktop "GNOME Software"
             ;;
         KDE)
-            # Disable Discover autostart
-            if [[ -f /etc/xdg/autostart/org.kde.discover.notifier.desktop ]]; then
-                local autostart_file="$HOME/.config/autostart/org.kde.discover.notifier.desktop"
-                
-                if [[ ! -f "$autostart_file" ]]; then
-                    cp /etc/xdg/autostart/org.kde.discover.notifier.desktop "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
-                fi
-                
-                if grep -q '^Hidden=' "$autostart_file" 2>/dev/null; then
-                    sed -i 's/^Hidden=.*/Hidden=true/' "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
-                else
-                    printf '\nHidden=true\n' >> "$autostart_file"
-                fi
-                
-                log_success "KDE Discover autostart disabled"
-            fi
+            disable_autostart_entry org.kde.discover.notifier.desktop "KDE Discover"
             ;;
         *)
             log "Unknown desktop environment, skipping software store autostart configuration"
@@ -795,7 +707,7 @@ setup_repositories() {
     # Fedora Workstation repositories
     sudo dnf -y install fedora-workstation-repositories 2>&1 | tee -a "$LOG_FILE" || true
 
-    # Fedora Repos Arhive
+    # Fedora Repos Archive
     sudo dnf -y install fedora-repos-archive 2>&1 | tee -a "$LOG_FILE" || true
     
     # Configure third-party repos
@@ -859,8 +771,8 @@ install_packages() {
         # Networking
         wireguard-tools wget
         
-        # Shell and terminal
-        fish kitty
+        # Shell
+        fish
 
         # Modern CLI tools
         eza bat
@@ -886,7 +798,9 @@ install_packages() {
     log "Packages: ${packages[*]}"
     echo ""
     
-    if sudo dnf -y install "${packages[@]}"; then
+    # --skip-unavailable: one missing package (e.g. an unreachable third-party repo)
+    # must not abort the whole transaction
+    if sudo dnf -y install --skip-unavailable "${packages[@]}"; then
         echo "package installation completed successfully" >> "$LOG_FILE"
         echo ""
         log_success "Main packages installed successfully"
@@ -900,8 +814,8 @@ install_packages() {
     echo ""
     log "Installing multimedia support..."
     echo ""
-    sudo dnf -y group install multimedia --setopt=strict=0 || log_error "Multimedia group install had issues"
-    sudo dnf -y group install sound-and-video || log_error "Sound-and-video group install had issues"
+    sudo dnf -y group install --skip-unavailable multimedia --setopt=strict=0 || log_error "Multimedia group install had issues"
+    sudo dnf -y group install --skip-unavailable sound-and-video || log_error "Sound-and-video group install had issues"
     
     # Replace free versions with full-featured ones
     echo ""
@@ -911,8 +825,7 @@ install_packages() {
     sudo dnf -y swap ffmpeg-free ffmpeg --allowerasing || log_error "FFmpeg swap had issues"
     sudo dnf -y swap mesa-va-drivers mesa-va-drivers-freeworld --allowerasing || log_error "Mesa VA drivers swap had issues"
     sudo dnf -y swap mesa-vulkan-drivers mesa-vulkan-drivers-freeworld --allowerasing || log_error "Mesa Vulkan drivers swap had issues"
-    sudo dnf -y swap mesa-vdpau-drivers mesa-vdpau-drivers-freeworld --allowerasing || log_error "Mesa VDPAU drivers swap had issues"
-    
+
     echo ""
     log_success "Multimedia packages installed"
 }
@@ -969,15 +882,6 @@ setup_ledger_udev() {
 
     log "Downloading Ledger udev rules script..."
     if curl -fsSL -o "$temp_script" https://raw.githubusercontent.com/LedgerHQ/udev-rules/master/add_udev_rules.sh 2>> "$LOG_FILE"; then
-        log "Downloaded Ledger udev rules script, reviewing..."
-        
-        # Basic safety check
-        if grep -q "rm -rf" "$temp_script" || grep -q "dd if=" "$temp_script"; then
-            log_error "Script contains potentially dangerous commands, skipping"
-            rm -f "$temp_script"
-            return 1
-        fi
-        
         log "Executing Ledger udev rules script..."
         if sudo bash "$temp_script" >> "$LOG_FILE" 2>&1; then
             log_success "Ledger udev rules installed"
@@ -1006,148 +910,92 @@ install_zed_editor() {
     fi
 }
 
+# Print the first asset URL of the latest GitHub release matching a jq regex (empty on any failure)
+github_asset_url() {
+    local repo="$1"
+    local regex="$2"
+    curl -fsSL "https://api.github.com/repos/$repo/releases/latest" 2>> "$LOG_FILE" | \
+        jq -r --arg re "$regex" '[.assets[]?.browser_download_url | select(test($re))][0] // empty' 2>> "$LOG_FILE" || true
+}
+
+# Download a file into the current directory unless it is already there, then remove
+# older versions matching old_glob. The download goes to a .part file first, so an
+# interrupted download never ends up under the final name.
+fetch_package() {
+    local name="$1"
+    local url="$2"
+    local file="$3"
+    local old_glob="$4"
+
+    if [[ -z "$url" ]] || [[ -z "$file" ]]; then
+        log_error "$name download URL not found"
+        return 0
+    fi
+
+    if [[ -f "$file" ]]; then
+        log "$name already downloaded"
+        return 0
+    fi
+
+    log "Downloading $name..."
+    if wget -q --show-progress -O "$file.part" "$url"; then
+        mv -f "$file.part" "$file"
+        find . -maxdepth 1 -name "$old_glob" ! -name "$file" -delete
+        echo "$name downloaded: $file" >> "$LOG_FILE"
+    else
+        rm -f "$file.part"
+        log_error "Failed to download $name"
+    fi
+}
+
 download_third_party_apps() {
     log_section "Downloading third-party applications"
-    
+
     mkdir -p "$PACKAGES_DIR"
     pushd "$PACKAGES_DIR" >/dev/null
 
-    # Ledger Live
+    local url
+
+    # Ledger Live (the "latest" URL redirects to the versioned AppImage)
     log "Checking for Ledger Live updates..."
-    local ledger_url
-    ledger_url=$(curl -s -L -w '%{url_effective}' -o /dev/null "https://download.live.ledger.com/latest/linux")
-    local ledger_file
-    ledger_file=$(basename "$ledger_url")
-    
-    if [[ -n "$ledger_file" ]] && [[ ! -f "$ledger_file" ]]; then
-        log "Downloading Ledger Live..."
-        find . -maxdepth 1 -name "ledger-live-desktop-*.AppImage" -delete
-        if wget --show-progress "$ledger_url" 2>&1; then
-            echo "Ledger Live downloaded: $ledger_file" >> "$LOG_FILE"
-        else
-            log_error "Failed to download Ledger Live"
-        fi
-    else
-        log "Ledger Live already downloaded"
+    url=$(curl -fsSL -w '%{url_effective}' -o /dev/null "https://download.live.ledger.com/latest/linux" 2>> "$LOG_FILE" || true)
+    if [[ "$url" != *.AppImage ]]; then
+        url=""
     fi
-    
+    fetch_package "Ledger Live" "$url" "${url##*/}" "ledger-live-desktop-*.AppImage"
+
     # Tabby Terminal
     log "Checking for Tabby Terminal updates..."
-    local tabby_url
-    tabby_url=$(curl -s "https://api.github.com/repos/Eugeny/tabby/releases/latest" | \
-                jq -r '[.assets[].browser_download_url | select(test("linux-x64\\.rpm$"))][0] // empty')
-    
-    if [[ -n "$tabby_url" ]]; then
-        local tabby_file
-        tabby_file=$(basename "$tabby_url")
-        if [[ ! -f "$tabby_file" ]]; then
-            log "Downloading Tabby Terminal..."
-            find . -maxdepth 1 -name "tabby-*.rpm" -delete
-            if wget --show-progress "$tabby_url" 2>&1; then
-                echo "Tabby Terminal downloaded: $tabby_file" >> "$LOG_FILE"
-            else
-                log_error "Failed to download Tabby"
-            fi
-        else
-            log "Tabby Terminal already downloaded"
-        fi
-    fi
-    
+    url=$(github_asset_url "Eugeny/tabby" 'linux-x64\.rpm$')
+    fetch_package "Tabby Terminal" "$url" "${url##*/}" "tabby-*.rpm"
+
     # Bruno API Client
     log "Checking for Bruno updates..."
-    local bruno_url
-    bruno_url=$(curl -s "https://api.github.com/repos/usebruno/bruno/releases/latest" | \
-                jq -r '[.assets[].browser_download_url | select(test("_x86_64_linux\\.rpm$"))][0] // empty')
-    
-    if [[ -n "$bruno_url" ]]; then
-        local bruno_file
-        bruno_file=$(basename "$bruno_url")
-        if [[ ! -f "$bruno_file" ]]; then
-            log "Downloading Bruno..."
-            find . -maxdepth 1 -name "bruno_*.rpm" -delete
-            if wget --show-progress "$bruno_url" 2>&1; then
-                echo "Bruno downloaded: $bruno_file" >> "$LOG_FILE"
-            else
-                log_error "Failed to download Bruno"
-            fi
-        else
-            log "Bruno already downloaded"
-        fi
-    fi
-    
+    url=$(github_asset_url "usebruno/bruno" '_x86_64_linux\.rpm$')
+    fetch_package "Bruno" "$url" "${url##*/}" "bruno_*.rpm"
+
     # Telegram Desktop
     log "Checking for Telegram Desktop updates..."
-    local tg_url
-    tg_url=$(curl -s "https://api.github.com/repos/telegramdesktop/tdesktop/releases/latest" | \
-             jq -r '[.assets[].browser_download_url | select(test("tsetup\\.[0-9]+\\.[0-9]+\\.[0-9]+\\.tar\\.xz$"))][0] // empty')
-    
-    if [[ -n "$tg_url" ]]; then
-        local tg_file
-        tg_file=$(basename "$tg_url")
-        if [[ ! -f "$tg_file" ]]; then
-            log "Downloading Telegram Desktop..."
-            find . -maxdepth 1 -name "tsetup.*.tar.xz" -delete
-            if wget --show-progress "$tg_url" 2>&1; then
-                echo "Telegram Desktop downloaded: $tg_file" >> "$LOG_FILE"
-            else
-                log_error "Failed to download Telegram"
-            fi
-        else
-            log "Telegram Desktop already downloaded"
-        fi
-    fi
-    
-    # MikroTik WinBox
+    url=$(github_asset_url "telegramdesktop/tdesktop" 'td-setup-linux-x64-[0-9.]+\.tar\.xz$')
+    fetch_package "Telegram Desktop" "$url" "${url##*/}" "td-setup-linux-x64-*.tar.xz"
+
+    # MikroTik WinBox (URL is scraped from the download page; the file is renamed
+    # to include the version, since the upstream name is always WinBox_Linux.zip)
     log "Checking for WinBox updates..."
-
-    # Download page URL
-    DOWNLOAD_PAGE="https://mikrotik.com/download/winbox"
-
-    # Fetch uWinBox Linux ZIP URL
-    winbox_url=$(curl -sL "$DOWNLOAD_PAGE" | \
-        grep -Eo 'https://[a-z]+\.mikrotik\.com/routeros/winbox/[^"]+/WinBox_Linux\.zip' | head -n 1)
-
-    if [[ -n "$winbox_url" ]]; then
-        win_ver=$(printf '%s\n' "$winbox_url" | awk -F'/' '{print $(NF-1)}')
-        winbox_file="winbox_${win_ver}.zip"
-
-        if [[ ! -f "$winbox_file" ]]; then
-            log "Downloading WinBox..."
-            find . -maxdepth 1 -name "winbox_*.zip" -delete
-
-            if wget --show-progress -O "$winbox_file" "$winbox_url" 2>&1; then
-                echo "WinBox downloaded: $winbox_file" >> "$LOG_FILE"
-            else
-                log_error "Failed to download WinBox"
-            fi
-        else
-            log "WinBox already downloaded"
-        fi
+    url=$(curl -fsSL "https://mikrotik.com/download/winbox" 2>> "$LOG_FILE" | \
+        grep -Eo 'https://[a-z]+\.mikrotik\.com/routeros/winbox/[^"]+/WinBox_Linux\.zip' | head -n 1 || true)
+    if [[ -n "$url" ]]; then
+        local winbox_version
+        winbox_version=$(awk -F'/' '{print $(NF-1)}' <<< "$url")
+        fetch_package "WinBox" "$url" "winbox_${winbox_version}.zip" "winbox_*.zip"
     else
         log_error "WinBox URL not found — MikroTik page format may have changed"
     fi
-    
+
     # balenaEtcher
     log "Checking for balenaEtcher updates..."
-    local etcher_url
-    etcher_url=$(curl -s "https://api.github.com/repos/balena-io/etcher/releases/latest" | \
-                 jq -r '[.assets[].browser_download_url | select(test("balenaEtcher-linux-x64-[0-9.]+\\.zip$"))][0] // empty')
-    
-    if [[ -n "$etcher_url" ]]; then
-        local etcher_file
-        etcher_file=$(basename "$etcher_url")
-        if [[ ! -f "$etcher_file" ]]; then
-            log "Downloading balenaEtcher..."
-            find . -maxdepth 1 -name "balenaEtcher-linux-x64-*.zip" -delete
-            if wget --show-progress "$etcher_url" 2>&1; then
-                echo "balenaEtcher downloaded: $etcher_file" >> "$LOG_FILE"
-            else
-                log_error "Failed to download balenaEtcher"
-            fi
-        else
-            log "balenaEtcher already downloaded"
-        fi
-    fi
+    url=$(github_asset_url "balena-io/etcher" 'balenaEtcher-linux-x64-[0-9.]+\.zip$')
+    fetch_package "balenaEtcher" "$url" "${url##*/}" "balenaEtcher-linux-x64-*.zip"
 
     echo ""
     log_success "Third-party applications downloaded"
@@ -1177,9 +1025,20 @@ install_third_party_apps() {
         fi
     fi
     
+    # Install Ledger Live AppImage under a stable name
+    local ledger_appimages=(./ledger-live-desktop-*.AppImage)
+    if [[ "${ledger_appimages[0]}" != "./ledger-live-desktop-*.AppImage" ]]; then
+        log "Installing Ledger Live..."
+        if install -m0755 "${ledger_appimages[0]}" "$APPS_DIR/ledger-live-desktop.AppImage" 2>> "$LOG_FILE"; then
+            log_success "Ledger Live installed to $APPS_DIR/ledger-live-desktop.AppImage"
+        else
+            log_error "Failed to install Ledger Live"
+        fi
+    fi
+
     # Extract Telegram
-    local tg_archives=(./tsetup*.tar.xz)
-    if [[ "${tg_archives[0]}" != "./tsetup*.tar.xz" ]]; then
+    local tg_archives=(./td-setup-linux-x64-*.tar.xz)
+    if [[ "${tg_archives[0]}" != "./td-setup-linux-x64-*.tar.xz" ]]; then
         log "Extracting Telegram Desktop..."
         rm -rf "$APPS_DIR/Telegram"
         if tar -xJf "${tg_archives[0]}" -C "$APPS_DIR" 2>> "$LOG_FILE"; then
@@ -1246,20 +1105,22 @@ main() {
     log "Log file: $LOG_FILE"
     
     check_fedora
-    
+    check_not_root
+    start_sudo_keepalive
+
     # Perform initial system update and check if reboot is needed
     initial_system_update
-    
+
     detect_desktop_environment
-    
+
     # Basic packages and Nerd Font (doesn't require repos)
     install_basic_packages
     install_nerd_font
-    
-    # Repository setup (required for system fonts from tainted)
+
+    # Repository setup (RPM Fusion, Chrome, 1Password, Master PDF Editor)
     setup_repositories
-    
-    # System fonts installation (requires tainted repo for msttcorefonts)
+
+    # System fonts installation (Fedora repos)
     install_system_fonts
 
     # System optimization
@@ -1278,8 +1139,7 @@ main() {
     download_third_party_apps
     install_third_party_apps
 
-    # Shell and terminal setup
-    configure_kitty
+    # Shell setup
     setup_fish
 
     log_section "Setup Complete!"
@@ -1289,18 +1149,17 @@ main() {
     log ""
     log "Next steps:"
     log "  1. Log out and log back in (new default shell: Fish)"
-    log "  2. Open Kitty terminal — it is now the default"
-    log "  3. Verify setup: starship, zed --version, kitty --version"
+    log "  2. Set your terminal font to '$FONT_NAME' so Starship icons render"
+    log "  3. Verify setup: starship --version, zed --version"
     log "  4. Use 'update' command anytime to update your system"
     log ""
-    log "Shell and terminal:"
+    log "Shell:"
     log "  - Shell: Fish with Starship prompt"
-    log "  - Terminal: Kitty (Catppuccin Mocha theme)"
     log "  - Font: FiraCode Nerd Font Mono"
     log ""
     log "Installed applications:"
     log "  - Editors: Zed"
-    log "  - Terminal: Kitty, Tabby"
+    log "  - Terminal: Tabby"
     log "  - Development: Bruno API Client"
     log "  - Communication: Telegram, Zoom"
     log "  - Utilities: Ledger Live, WinBox, balenaEtcher"

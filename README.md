@@ -1,8 +1,8 @@
 # Fedora Post-Installation Setup Script
  
  This script automates the setup of a fresh Fedora installation with:
- - Fish shell with Starship prompt and Kitty terminal
- - Comprehensive font collection (Nerd Fonts, Google, Microsoft)
+ - Fish shell with Starship prompt
+ - Font collection (FiraCode Nerd Font, Noto, DejaVu, Liberation, Inter)
  - RPM Fusion repositories (free, nonfree, and tainted)
  - Essential system tools and applications
  - Performance optimizations
