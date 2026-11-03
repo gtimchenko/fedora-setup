@@ -3,7 +3,7 @@
 # Fedora Post-Installation Setup Script
 # 
 # This script automates the setup of a fresh Fedora Workstation (GNOME) installation with:
-# - Zsh with Oh My Zsh and Powerlevel10k
+# - Zsh with Oh My Zsh and Starship prompt
 # - Font collection (FiraCode Nerd Font, Noto, DejaVu, Liberation, Inter)
 # - RPM Fusion repositories (free, nonfree, and tainted)
 # - Essential system tools and applications
@@ -24,9 +24,12 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="2.0.0"
-readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
+readonly SCRIPT_VERSION="2.1.0"
+readonly LOG_DIR="$HOME/.local/state/fedora-setup"
+LOG_FILE="$LOG_DIR/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
+readonly LOG_FILE
 readonly APPS_DIR="$HOME/Applications"
+readonly DESKTOP_ENTRIES_DIR="$HOME/.local/share/applications"
 readonly PACKAGES_DIR="$HOME/packages"
 readonly FONT_DIR="$HOME/.local/share/fonts"
 
@@ -54,12 +57,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+mkdir -p "$LOG_DIR"
+
 # ============================================================================
 # Utility Functions
 # ============================================================================
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+log_blank() {
+    echo "" | tee -a "$LOG_FILE"
 }
 
 log_error() {
@@ -99,6 +108,46 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# dnf with --skip-unavailable exits successfully even when it skips packages:
+# report the requested packages that are still not installed
+report_missing_packages() {
+    local missing
+    missing="$(rpm -q "$@" 2>/dev/null | awk '/is not installed$/ {print $2}' | paste -sd ' ' || true)"
+    if [[ -n "$missing" ]]; then
+        log_warning "Not installed (unavailable or failed): $missing"
+    fi
+}
+
+# Create a desktop entry so an app installed outside the package manager
+# shows up in the GNOME app grid
+create_desktop_entry() {
+    local id="$1"
+    local name="$2"
+    local exec_line="$3"
+    local icon="$4"
+    local categories="$5"
+    local extra="${6:-}"
+
+    mkdir -p "$DESKTOP_ENTRIES_DIR"
+    {
+        echo "[Desktop Entry]"
+        echo "Type=Application"
+        echo "Name=$name"
+        echo "Exec=$exec_line"
+        echo "Icon=$icon"
+        echo "Terminal=false"
+        echo "Categories=$categories"
+        if [[ -n "$extra" ]]; then
+            echo "$extra"
+        fi
+    } > "$DESKTOP_ENTRIES_DIR/$id.desktop"
+
+    if command_exists update-desktop-database; then
+        update-desktop-database "$DESKTOP_ENTRIES_DIR" >/dev/null 2>&1 || true
+    fi
+    log_success "Desktop entry created for $name"
+}
+
 check_fedora() {
     if [[ ! -f /etc/fedora-release ]]; then
         log_error "This script is designed for Fedora. Exiting."
@@ -132,10 +181,7 @@ initial_system_update() {
     
     log "Cleaning DNF cache..."
     sudo dnf clean all >> "$LOG_FILE" 2>&1 || true
-    
-    log "Refreshing package metadata..."
-    sudo dnf makecache >> "$LOG_FILE" 2>&1 || true
-    
+
     echo ""
     log "Updating system packages (this may take a while)..."
     echo ""
@@ -182,18 +228,19 @@ initial_system_update() {
     fi
 
     if [[ "$needs_reboot" == "true" ]]; then
+        # ASCII-only text inside the box: printf pads by bytes, so this keeps the frame aligned
+        local border
+        border="$(printf '═%.0s' {1..60})"
         echo ""
-        echo ""
-        log_critical "╔════════════════════════════════════════════════════════════════╗"
-        log_critical "║                                                                ║"
-        log_critical "║               ⚠️  REBOOT REQUIRED  ⚠️                           ║"
-        log_critical "║                                                                ║"
-        log_critical "║  Critical system packages have been updated.                  ║"
-        log_critical "║  Please reboot your system and run this script again.         ║"
-        log_critical "║                                                                ║"
-        log_critical "║  Run: sudo reboot                                             ║"
-        log_critical "║                                                                ║"
-        log_critical "╚════════════════════════════════════════════════════════════════╝"
+        log_critical "╔${border}╗"
+        local text
+        for text in "" "REBOOT REQUIRED" "" \
+                    "Critical system packages have been updated." \
+                    "Please reboot your system and run this script again." \
+                    "" "Run: sudo reboot" ""; do
+            log_critical "$(printf '║  %-58s║' "$text")"
+        done
+        log_critical "╚${border}╝"
         echo ""
         exit 0
     else
@@ -220,11 +267,14 @@ check_gnome() {
 install_basic_packages() {
     log_section "Installing basic packages"
     
-    if sudo dnf -y install --skip-unavailable git unzip jq dnf5-plugins 7zip 7zip-standalone 2>&1 | tee -a "$LOG_FILE"; then
+    local packages=(git unzip jq dnf5-plugins 7zip 7zip-standalone)
+
+    if sudo dnf -y install --skip-unavailable "${packages[@]}" 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Basic packages installed"
     else
         log_error "Failed to install some basic packages (continuing anyway)"
     fi
+    report_missing_packages "${packages[@]}"
 }
 
 install_nerd_font() {
@@ -240,7 +290,8 @@ install_nerd_font() {
     
     log "Downloading FiraCode Nerd Font..."
     if curl -fsSL -o "$temp_zip" "$FONT_ZIP_URL"; then
-        if unzip -oq "$temp_zip" -d "$FONT_DIR"; then
+        # Font files only: the archive also contains README.md and LICENSE
+        if unzip -oq "$temp_zip" '*.ttf' -d "$FONT_DIR"; then
             fc-cache -f >/dev/null || true
             log_success "FiraCode Nerd Font installed successfully"
         else
@@ -255,29 +306,239 @@ install_nerd_font() {
 install_system_fonts() {
     log_section "Installing system fonts"
     
+    local fonts=(
+        google-noto-sans-fonts
+        google-noto-sans-mono-fonts
+        google-noto-emoji-fonts
+        dejavu-sans-fonts
+        dejavu-sans-mono-fonts
+        liberation-fonts
+        rsms-inter-fonts
+        terminus-fonts
+    )
+
     # Base recommended fonts
     log "Installing base recommended fonts..."
-    if sudo dnf -y install --skip-unavailable \
-        google-noto-sans-fonts \
-        google-noto-sans-mono-fonts \
-        google-noto-emoji-fonts \
-        dejavu-sans-fonts \
-        dejavu-sans-mono-fonts \
-        liberation-fonts \
-        rsms-inter-fonts \
-        terminus-fonts 2>&1 | tee -a "$LOG_FILE"; then
+    if sudo dnf -y install --skip-unavailable "${fonts[@]}" 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Base fonts installed"
     else
         log_error "Some base fonts failed to install (continuing anyway)"
     fi
+    report_missing_packages "${fonts[@]}"
 
     log "Updating font cache..."
     sudo fc-cache -f >/dev/null 2>&1 || true
     log_success "Font cache updated"
 }
 
+install_starship() {
+    log_section "Installing Starship prompt"
+
+    if command_exists starship; then
+        log_success "Starship already installed"
+    else
+        log "Installing Starship..."
+        if curl -fsSL https://starship.rs/install.sh | sh -s -- -y; then
+            log_success "Starship installed"
+        else
+            log_error "Failed to install Starship"
+        fi
+    fi
+
+    # Configure Starship
+    local starship_conf="$HOME/.config/starship.toml"
+    if [[ ! -f "$starship_conf" ]]; then
+        log "Creating Starship configuration..."
+        mkdir -p "$(dirname "$starship_conf")"
+        cat > "$starship_conf" <<'STAREOF'
+# Starship prompt — Catppuccin Mocha powerline style
+
+palette = "catppuccin_mocha"
+
+format = """
+[](mauve)\
+$os\
+$username\
+[](bg:blue fg:mauve)\
+$directory\
+[](bg:green fg:blue)\
+$git_branch\
+$git_status\
+[](bg:teal fg:green)\
+$python\
+$rust\
+$golang\
+$nodejs\
+$java\
+$docker_context\
+[](bg:surface0 fg:teal)\
+$cmd_duration\
+$status\
+[](fg:surface0)\
+$fill\
+[](fg:surface0)\
+$time\
+[](fg:mauve bg:surface0)\
+$battery\
+[](fg:mauve)\
+$line_break\
+$character"""
+
+[os]
+disabled = false
+style = "bg:mauve fg:crust"
+[os.symbols]
+Fedora = " "
+Linux = " "
+Macos = " "
+Windows = " "
+
+[username]
+show_always = false
+style_user = "bg:mauve fg:crust"
+style_root = "bg:red fg:crust bold"
+format = '[ $user]($style)'
+
+[directory]
+style = "bg:blue fg:crust"
+format = "[ $path ]($style)"
+truncation_length = 3
+truncation_symbol = "…/"
+[directory.substitutions]
+"Documents" = "󰈙 "
+"Downloads" = " "
+"Music" = "󰎆 "
+"Pictures" = " "
+"Development" = "󰲋 "
+
+[git_branch]
+symbol = ""
+style = "bg:green fg:crust"
+format = '[ $symbol $branch ]($style)'
+
+[git_status]
+style = "bg:green fg:crust"
+format = '[$all_status$ahead_behind ]($style)'
+conflicted = " "
+ahead = "⇡${count} "
+behind = "⇣${count} "
+diverged = "⇕⇡${ahead_count}⇣${behind_count} "
+up_to_date = ""
+untracked = " "
+stashed = "󰏗 "
+modified = " "
+staged = " "
+renamed = "󰁕 "
+deleted = " "
+
+[python]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version(\($virtualenv\)) ]($style)'
+
+[rust]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version ]($style)'
+
+[golang]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version ]($style)'
+
+[nodejs]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version ]($style)'
+
+[java]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $version ]($style)'
+
+[docker_context]
+symbol = ""
+style = "bg:teal fg:crust"
+format = '[ $symbol $context ]($style)'
+
+[cmd_duration]
+min_time = 2_000
+style = "bg:surface0 fg:text"
+format = '[ 󱎫 $duration ]($style)'
+
+[status]
+disabled = false
+style = "bg:surface0 fg:red"
+format = '[ $symbol$status ]($style)'
+symbol = " "
+
+[fill]
+symbol = " "
+
+[time]
+disabled = false
+time_format = "%H:%M"
+style = "bg:surface0 fg:subtext0"
+format = '[ 󰥔 $time ]($style)'
+
+[battery]
+disabled = true
+
+[character]
+success_symbol = "[❯](bold green)"
+error_symbol = "[❯](bold red)"
+vimcmd_symbol = "[❮](bold mauve)"
+
+[palettes.catppuccin_mocha]
+rosewater = "#f5e0dc"
+flamingo  = "#f2cdcd"
+pink      = "#f5c2e7"
+mauve     = "#cba6f7"
+red       = "#f38ba8"
+maroon    = "#eba0ac"
+peach     = "#fab387"
+yellow    = "#f9e2af"
+green     = "#a6e3a1"
+teal      = "#94e2d5"
+sky       = "#89dceb"
+sapphire  = "#74c7ec"
+blue      = "#89b4fa"
+lavender  = "#b4befe"
+text      = "#cdd6f4"
+subtext1  = "#bac2de"
+subtext0  = "#a6adc8"
+overlay2  = "#9399b2"
+overlay1  = "#7f849c"
+overlay0  = "#6c7086"
+surface2  = "#585b70"
+surface1  = "#45475a"
+surface0  = "#313244"
+base      = "#1e1e2e"
+mantle    = "#181825"
+crust     = "#11111b"
+STAREOF
+        log_success "Starship configuration created"
+    else
+        log_success "Starship configuration already exists"
+    fi
+}
+
+# Remove Powerlevel10k leftovers (instant prompt, ~/.p10k.zsh sourcing) from a zshrc
+remove_p10k_from_zshrc() {
+    local zshrc="$1"
+    sed -i \
+        -e '/^if \[\[ -r .*p10k-instant-prompt-/{N;N;/\nfi$/d}' \
+        -e '/^[[:space:]]*\[\[ ! -f ~\/\.p10k\.zsh \]\] || source ~\/\.p10k\.zsh[[:space:]]*$/d' \
+        -e '/^# Enable Powerlevel10k instant prompt/d' \
+        -e '/^# Initialization code that may require console input/d' \
+        -e '/^# confirmations, etc\.) must go above this block/d' \
+        -e '/^# Powerlevel10k instant prompt/d' \
+        -e '/^# .*p10k configure/d' \
+        "$zshrc"
+}
+
 setup_zsh() {
-    log_section "Setting up Zsh with Oh My Zsh and Powerlevel10k"
+    log_section "Setting up Zsh with Oh My Zsh and Starship"
 
     if ! command_exists zsh; then
         log_error "Zsh not installed, skipping shell setup"
@@ -285,7 +546,6 @@ setup_zsh() {
     fi
 
     local omz_dir="$HOME/.oh-my-zsh"
-    local p10k_dir="$omz_dir/custom/themes/powerlevel10k"
     local zshrc="$HOME/.zshrc"
 
     # Oh My Zsh (cloned directly: the official installer would also replace ~/.zshrc and run chsh)
@@ -300,18 +560,6 @@ setup_zsh() {
         fi
     fi
 
-    # Powerlevel10k theme
-    if [[ -d "$p10k_dir" ]]; then
-        log_success "Powerlevel10k already installed"
-    elif [[ -d "$omz_dir" ]]; then
-        log "Installing Powerlevel10k..."
-        if git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$p10k_dir" >> "$LOG_FILE" 2>&1; then
-            log_success "Powerlevel10k installed"
-        else
-            log_error "Failed to install Powerlevel10k"
-        fi
-    fi
-
     # ~/.zshrc: a config without Oh My Zsh is moved aside (like the Oh My Zsh installer does)
     if [[ -f "$zshrc" ]] && ! grep -q 'oh-my-zsh.sh' "$zshrc"; then
         mv "$zshrc" "$zshrc.pre-oh-my-zsh"
@@ -321,25 +569,23 @@ setup_zsh() {
     if [[ ! -f "$zshrc" ]]; then
         log "Creating Zsh configuration..."
         cat > "$zshrc" <<'ZSHEOF'
-# Powerlevel10k instant prompt (must stay close to the top of ~/.zshrc)
-if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
-  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
-fi
-
-# Oh My Zsh
-export ZSH="$HOME/.oh-my-zsh"
-ZSH_THEME="powerlevel10k/powerlevel10k"
-plugins=(git)
-source $ZSH/oh-my-zsh.sh
-
-# Powerlevel10k configuration (run `p10k configure` to regenerate)
-[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
-
-# PATH
+# PATH (typeset -U drops duplicates in nested shells)
+typeset -U path PATH
 [[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"
 [[ -d "$HOME/bin" ]] && export PATH="$HOME/bin:$PATH"
 [[ -d "$HOME/Applications" ]] && export PATH="$HOME/Applications:$PATH"
 [[ -d "$HOME/.cargo/bin" ]] && export PATH="$HOME/.cargo/bin:$PATH"
+
+# Oh My Zsh (no theme: the prompt is provided by Starship)
+export ZSH="$HOME/.oh-my-zsh"
+ZSH_THEME=""
+plugins=(git)
+source $ZSH/oh-my-zsh.sh
+
+# Starship prompt
+if (( $+commands[starship] )); then
+    eval "$(starship init zsh)"
+fi
 
 # Modern CLI replacements
 if (( $+commands[eza] )); then
@@ -356,26 +602,61 @@ fi
 ZSHEOF
         log_success "Zsh configuration created"
     else
-        # Ensure Powerlevel10k is the Oh My Zsh theme
-        if ! grep -q '^ZSH_THEME="powerlevel10k/powerlevel10k"' "$zshrc"; then
-            if grep -q '^ZSH_THEME=' "$zshrc"; then
-                sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' "$zshrc"
-                log_success "Zsh theme switched to Powerlevel10k"
-            else
-                log_warning "ZSH_THEME not found in ~/.zshrc, set it to \"powerlevel10k/powerlevel10k\" manually"
-            fi
-        else
-            log_success "Powerlevel10k already configured in Zsh"
+        # Migrate an existing Oh My Zsh config to Starship (a backup is made before any change)
+        local needs_theme_reset=false
+        local needs_p10k_cleanup=false
+        local needs_old_alias_removal=false
+        local needs_starship_init=false
+
+        if grep -q '^ZSH_THEME=' "$zshrc" && ! grep -q '^ZSH_THEME=""' "$zshrc"; then
+            needs_theme_reset=true
+        fi
+        if grep -q -e 'p10k-instant-prompt' -e '\.p10k\.zsh' "$zshrc"; then
+            needs_p10k_cleanup=true
+        fi
+        # Update alias generated by v2.0.0 (pulls Powerlevel10k)
+        if grep -q '^alias update=.*powerlevel10k' "$zshrc"; then
+            needs_old_alias_removal=true
+        fi
+        if ! grep -q 'starship init zsh' "$zshrc"; then
+            needs_starship_init=true
         fi
 
-        # Ensure the Powerlevel10k config is sourced
-        if ! grep -q 'p10k.zsh' "$zshrc"; then
+        if [[ "$needs_theme_reset" == "true" || "$needs_p10k_cleanup" == "true" || \
+              "$needs_old_alias_removal" == "true" || "$needs_starship_init" == "true" ]]; then
+            local backup
+            backup="$zshrc.bak-$(date +%Y%m%d-%H%M%S)"
+            cp "$zshrc" "$backup"
+            log "Backed up ~/.zshrc to $backup"
+        fi
+
+        if [[ "$needs_theme_reset" == "true" ]]; then
+            sed -i 's|^ZSH_THEME=.*|ZSH_THEME=""|' "$zshrc"
+            log_success "Oh My Zsh theme disabled (prompt is provided by Starship)"
+        fi
+
+        if [[ "$needs_p10k_cleanup" == "true" ]]; then
+            remove_p10k_from_zshrc "$zshrc"
+            log_success "Powerlevel10k configuration removed from ~/.zshrc"
+        fi
+
+        if [[ "$needs_old_alias_removal" == "true" ]]; then
+            sed -i -e '/^# System update$/{N;/\nalias update=.*powerlevel10k/d}' \
+                   -e '/^alias update=.*powerlevel10k/d' "$zshrc"
+            log_success "Old update alias removed from ~/.zshrc"
+        fi
+
+        if [[ "$needs_starship_init" == "true" ]]; then
             cat >> "$zshrc" <<'ZSHEOF'
 
-# Powerlevel10k configuration (run `p10k configure` to regenerate)
-[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
+# Starship prompt
+if (( $+commands[starship] )); then
+    eval "$(starship init zsh)"
+fi
 ZSHEOF
-            log_success "Powerlevel10k config sourcing added to ~/.zshrc"
+            log_success "Starship init added to ~/.zshrc"
+        else
+            log_success "Starship already configured in Zsh"
         fi
     fi
 
@@ -384,7 +665,7 @@ ZSHEOF
         cat >> "$zshrc" <<'ZSHEOF'
 
 # System update
-alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids || true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y; git -C "$ZSH/custom/themes/powerlevel10k" pull --ff-only'
+alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids || true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y; curl -fsSL https://starship.rs/install.sh | sh -s -- -y'
 ZSHEOF
         log_success "Update alias added to ~/.zshrc"
     fi
@@ -394,7 +675,7 @@ ZSHEOF
     local current_shell
 
     zsh_path="$(command -v zsh)"
-    current_shell="$(getent passwd "$USER" | cut -d: -f7 || echo "")"
+    current_shell="$(getent passwd "$(id -un)" | cut -d: -f7 || echo "")"
 
     # Ensure zsh is in /etc/shells
     if ! grep -qx "$zsh_path" /etc/shells; then
@@ -417,7 +698,7 @@ ZSHEOF
 configure_terminal_font() {
     log_section "Configuring terminal font"
 
-    # Ptyxis is the default GNOME terminal; a Nerd Font is required for Powerlevel10k icons
+    # Ptyxis is the default GNOME terminal; a Nerd Font is required for Starship icons
     if command_exists gsettings && gsettings list-schemas 2>/dev/null | grep -qx org.gnome.Ptyxis; then
         if gsettings set org.gnome.Ptyxis use-system-font false 2>> "$LOG_FILE" && \
            gsettings set org.gnome.Ptyxis font-name "$FONT_SETTINGS" 2>> "$LOG_FILE"; then
@@ -521,10 +802,8 @@ setup_repositories() {
     # Fedora Repos Archive
     sudo dnf -y install fedora-repos-archive 2>&1 | tee -a "$LOG_FILE" || true
     
-    # Configure third-party repos
+    # Enable Google Chrome repository (shipped disabled by fedora-workstation-repositories)
     sudo dnf config-manager setopt google-chrome.enabled=1 2>&1 | tee -a "$LOG_FILE" || true
-    sudo dnf config-manager setopt rpmfusion-nonfree-nvidia-driver.enabled=0 2>&1 | tee -a "$LOG_FILE" || true
-    sudo dnf config-manager setopt rpmfusion-nonfree-steam.enabled=1 2>&1 | tee -a "$LOG_FILE" || true
     
     # 1Password repository
     log "Adding 1Password repository..."
@@ -614,7 +893,8 @@ install_packages() {
         echo ""
         log_error "Some packages failed to install (continuing anyway)"
     fi
-    
+    report_missing_packages "${packages[@]}"
+
     # Install multimedia packages
     echo ""
     log "Installing multimedia support..."
@@ -696,13 +976,14 @@ setup_ledger_udev() {
 install_zed_editor() {
     log_section "Installing Zed editor"
     
-    if command_exists zed; then
+    # The installer puts the CLI into ~/.local/bin, which may not be in PATH yet
+    if command_exists zed || [[ -x "$HOME/.local/bin/zed" ]]; then
         log_success "Zed editor already installed"
         return 0
     fi
-    
+
     log "Installing Zed editor..."
-    if curl -f https://zed.dev/install.sh | sh 2>&1 | tee -a "$LOG_FILE"; then
+    if curl -fsSL https://zed.dev/install.sh | sh 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Zed editor installed"
     else
         log_error "Failed to install Zed editor"
@@ -786,46 +1067,111 @@ download_third_party_apps() {
     popd >/dev/null
 }
 
+# Check whether an app directory was already extracted from this archive
+# (the archive name is recorded in a marker file inside the app directory)
+is_installed_from() {
+    local app_dir="$1"
+    local archive="$2"
+    [[ -f "$app_dir/.installed-from" ]] && [[ "$(< "$app_dir/.installed-from")" == "$archive" ]]
+}
+
 install_third_party_apps() {
     log_section "Installing third-party applications"
     
     pushd "$PACKAGES_DIR" >/dev/null
     mkdir -p "$APPS_DIR"
     
-    # Install Ledger Live AppImage under a stable name
+    # Ledger Live: AppImage under a stable name, icon extracted from the AppImage
     local ledger_appimages=(./ledger-live-desktop-*.AppImage)
     if [[ "${ledger_appimages[0]}" != "./ledger-live-desktop-*.AppImage" ]]; then
-        log "Installing Ledger Live..."
-        if install -m0755 "${ledger_appimages[0]}" "$APPS_DIR/ledger-live-desktop.AppImage" 2>> "$LOG_FILE"; then
-            log_success "Ledger Live installed to $APPS_DIR/ledger-live-desktop.AppImage"
+        local ledger_target="$APPS_DIR/ledger-live-desktop.AppImage"
+        local ledger_icon="$APPS_DIR/ledger-live-desktop.png"
+
+        if [[ -f "$ledger_target" ]] && cmp -s "${ledger_appimages[0]}" "$ledger_target"; then
+            log_success "Ledger Live already up to date"
+        elif pgrep -f "$ledger_target" >/dev/null 2>&1; then
+            log_warning "Ledger Live is running, skipping update (close it and re-run the script)"
+        elif install -m0755 "${ledger_appimages[0]}" "$ledger_target" 2>> "$LOG_FILE"; then
+            rm -f "$ledger_icon"
+            log_success "Ledger Live installed to $ledger_target"
         else
             log_error "Failed to install Ledger Live"
         fi
+
+        if [[ -x "$ledger_target" ]]; then
+            if [[ ! -f "$ledger_icon" ]]; then
+                local temp_dir
+                temp_dir="$(mktemp -d)"
+                TEMP_FILES+=("$temp_dir")
+                # The top-level icon is a symlink into usr/share/icons, so extract the real files
+                (cd "$temp_dir" && "$ledger_target" --appimage-extract 'usr/share/icons/*') >/dev/null 2>&1 || true
+                local icon_src="$temp_dir/squashfs-root/usr/share/icons/hicolor/256x256/apps/ledger-live-desktop.png"
+                if [[ ! -f "$icon_src" ]]; then
+                    icon_src="$(find "$temp_dir/squashfs-root" -type f -name 'ledger-live-desktop.png' 2>/dev/null | head -n 1 || true)"
+                fi
+                if [[ -n "$icon_src" ]] && [[ -f "$icon_src" ]]; then
+                    cp "$icon_src" "$ledger_icon"
+                else
+                    log_warning "Could not extract Ledger Live icon"
+                fi
+            fi
+            # Electron AppImages cannot use the SUID sandbox, hence --no-sandbox
+            create_desktop_entry "ledger-live-desktop" "Ledger Live" \
+                "\"$ledger_target\" --no-sandbox %U" "$ledger_icon" "Office;Finance;" \
+                "MimeType=x-scheme-handler/ledgerlive;"
+        fi
     fi
 
-    # Extract Telegram
+    # Telegram (creates its own desktop entry on first launch)
     local tg_archives=(./td-setup-linux-x64-*.tar.xz)
     if [[ "${tg_archives[0]}" != "./td-setup-linux-x64-*.tar.xz" ]]; then
-        log "Extracting Telegram Desktop..."
-        rm -rf "$APPS_DIR/Telegram"
-        if tar -xJf "${tg_archives[0]}" -C "$APPS_DIR" 2>> "$LOG_FILE"; then
-            log_success "Telegram installed to $APPS_DIR/Telegram"
+        local tg_archive="${tg_archives[0]#./}"
+        local tg_dir="$APPS_DIR/Telegram"
+
+        if is_installed_from "$tg_dir" "$tg_archive"; then
+            log_success "Telegram Desktop already up to date"
+        elif pgrep -f "$tg_dir/Telegram" >/dev/null 2>&1; then
+            log_warning "Telegram Desktop is running, skipping update (close it and re-run the script)"
         else
-            log_error "Failed to extract Telegram"
+            log "Extracting Telegram Desktop..."
+            rm -rf "$tg_dir"
+            if tar -xJf "$tg_archive" -C "$APPS_DIR" 2>> "$LOG_FILE"; then
+                echo "$tg_archive" > "$tg_dir/.installed-from"
+                log_success "Telegram installed to $tg_dir"
+            else
+                log_error "Failed to extract Telegram"
+            fi
         fi
     fi
     
-    # Extract WinBox
+    # WinBox
     local winbox_zips=(./winbox_*.zip)
     if [[ "${winbox_zips[0]}" != "./winbox_*.zip" ]]; then
-        log "Extracting WinBox..."
-        rm -rf "$APPS_DIR/WinBox"
-        mkdir -p "$APPS_DIR/WinBox"
-        if unzip -oq "${winbox_zips[0]}" -d "$APPS_DIR/WinBox" 2>> "$LOG_FILE"; then
-            [[ -f "$APPS_DIR/WinBox/WinBox" ]] && chmod +x "$APPS_DIR/WinBox/WinBox"
-            log_success "WinBox installed to $APPS_DIR/WinBox"
+        local winbox_zip="${winbox_zips[0]#./}"
+        local winbox_dir="$APPS_DIR/WinBox"
+
+        if is_installed_from "$winbox_dir" "$winbox_zip"; then
+            log_success "WinBox already up to date"
+        elif pgrep -f "$winbox_dir/WinBox" >/dev/null 2>&1; then
+            log_warning "WinBox is running, skipping update (close it and re-run the script)"
         else
-            log_error "Failed to extract WinBox"
+            log "Extracting WinBox..."
+            rm -rf "$winbox_dir"
+            mkdir -p "$winbox_dir"
+            if unzip -oq "$winbox_zip" -d "$winbox_dir" 2>> "$LOG_FILE"; then
+                if [[ -f "$winbox_dir/WinBox" ]]; then
+                    chmod +x "$winbox_dir/WinBox"
+                fi
+                echo "$winbox_zip" > "$winbox_dir/.installed-from"
+                log_success "WinBox installed to $winbox_dir"
+            else
+                log_error "Failed to extract WinBox"
+            fi
+        fi
+
+        if [[ -x "$winbox_dir/WinBox" ]]; then
+            create_desktop_entry "winbox" "WinBox" "\"$winbox_dir/WinBox\"" \
+                "$winbox_dir/assets/img/winbox.png" "Network;"
         fi
     fi
     
@@ -876,34 +1222,33 @@ main() {
     install_third_party_apps
 
     # Shell and terminal setup
+    install_starship
     setup_zsh
     configure_terminal_font
 
     log_section "Setup Complete!"
     log "Log file saved to: $LOG_FILE"
-    log ""
+    log_blank
     log "Next steps:"
     log "  1. Log out and log back in (new default shell: Zsh)"
-    log "  2. Open a terminal: the Powerlevel10k wizard starts if ~/.p10k.zsh does not exist"
-    log "     (re-run it anytime with 'p10k configure')"
-    log "  3. Verify setup: zsh --version, zed --version"
-    log "  4. Use 'update' command anytime to update your system"
-    log ""
+    log "  2. Verify setup: zsh --version, starship --version, zed --version"
+    log "  3. Use 'update' command anytime to update your system"
+    log_blank
     log "Shell and terminal:"
-    log "  - Shell: Zsh with Oh My Zsh and Powerlevel10k"
+    log "  - Shell: Zsh with Oh My Zsh and Starship prompt (~/.config/starship.toml)"
     log "  - Terminal font (Ptyxis): $FONT_SETTINGS"
-    log ""
+    log_blank
     log "Installed applications:"
     log "  - Editors: Zed"
     log "  - Communication: Telegram, Zoom"
-    log "  - Utilities: Ledger Live, WinBox"
+    log "  - Utilities: Ledger Live, WinBox (in the app grid)"
     log "  - Flatpaks: Bazaar, Proton Mail, Spotify, and more"
-    log ""
+    log_blank
     log "Installed fonts:"
     log "  - FiraCode Nerd Font"
     log "  - Google Noto (Sans, Mono, Emoji)"
     log "  - DejaVu, Liberation, Inter, Terminus"
-    log ""
+    log_blank
     log "All done! Enjoy your Fedora setup!"
 }
 
