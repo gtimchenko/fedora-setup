@@ -2,14 +2,15 @@
 #
 # Fedora Post-Installation Setup Script
 # 
-# This script automates the setup of a fresh Fedora installation with:
-# - Fish shell with Starship prompt
+# This script automates the setup of a fresh Fedora Workstation (GNOME) installation with:
+# - Zsh with Oh My Zsh and Powerlevel10k
 # - Font collection (FiraCode Nerd Font, Noto, DejaVu, Liberation, Inter)
 # - RPM Fusion repositories (free, nonfree, and tainted)
 # - Essential system tools and applications
 # - Performance optimizations
 # - Third-party applications (Chrome, 1Password, Zed, etc.)
-# - Desktop environment detection (GNOME/KDE)
+#
+# Only GNOME is supported.
 #
 # Usage: ./fedora-setup.sh
 #
@@ -23,7 +24,7 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="2.0.0"
 readonly LOG_FILE="$HOME/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly APPS_DIR="$HOME/Applications"
 readonly PACKAGES_DIR="$HOME/packages"
@@ -31,13 +32,11 @@ readonly FONT_DIR="$HOME/.local/share/fonts"
 
 # Font configuration
 readonly FONT_NAME="FiraCode Nerd Font Mono"
+readonly FONT_SETTINGS="FiraCode Nerd Font Mono weight=450 10"
 readonly FONT_ZIP_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest/download/FiraCode.zip"
 
 # DNF configuration
 readonly DNF_MAX_PARALLEL=10
-
-# Desktop environment detection
-DESKTOP_ENV=""
 
 # Temporary files to clean up on exit
 TEMP_FILES=()
@@ -202,23 +201,16 @@ initial_system_update() {
     fi
 }
 
-detect_desktop_environment() {
-    log_section "Detecting desktop environment"
-    
-    # Check various environment variables and running processes
-    if [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]] || [[ "${DESKTOP_SESSION:-}" == *"plasma"* ]]; then
-        DESKTOP_ENV="KDE"
-    elif [[ "${XDG_CURRENT_DESKTOP:-}" == *"GNOME"* ]] || [[ "${DESKTOP_SESSION:-}" == *"gnome"* ]]; then
-        DESKTOP_ENV="GNOME"
-    elif pgrep -x "plasmashell" >/dev/null 2>&1; then
-        DESKTOP_ENV="KDE"
-    elif pgrep -x "gnome-shell" >/dev/null 2>&1; then
-        DESKTOP_ENV="GNOME"
+check_gnome() {
+    if [[ "${XDG_CURRENT_DESKTOP:-}" == *"GNOME"* ]] || pgrep -x "gnome-shell" >/dev/null 2>&1; then
+        log_success "GNOME desktop detected"
+    elif rpm -q gnome-shell >/dev/null 2>&1; then
+        # Installed but not running here (e.g. SSH or TTY): GNOME settings may not apply
+        log_warning "GNOME is installed but no GNOME session detected; run the script from a GNOME session for full setup"
     else
-        DESKTOP_ENV="UNKNOWN"
+        log_error "This script supports only Fedora Workstation with GNOME. Exiting."
+        exit 1
     fi
-    
-    log_success "Desktop environment detected: $DESKTOP_ENV"
 }
 
 # ============================================================================
@@ -284,325 +276,157 @@ install_system_fonts() {
     log_success "Font cache updated"
 }
 
-setup_fish() {
-    log_section "Setting up Fish shell with Starship"
+setup_zsh() {
+    log_section "Setting up Zsh with Oh My Zsh and Powerlevel10k"
 
-    local fish_conf_dir="$HOME/.config/fish"
-    local fish_conf="$fish_conf_dir/config.fish"
+    if ! command_exists zsh; then
+        log_error "Zsh not installed, skipping shell setup"
+        return 0
+    fi
 
-    mkdir -p "$fish_conf_dir"
+    local omz_dir="$HOME/.oh-my-zsh"
+    local p10k_dir="$omz_dir/custom/themes/powerlevel10k"
+    local zshrc="$HOME/.zshrc"
 
-    # Create or update config.fish
-    if [[ ! -f "$fish_conf" ]]; then
-        log "Creating Fish configuration..."
-        cat > "$fish_conf" <<'FISHEOF'
-# Disable greeting
-set -g fish_greeting
+    # Oh My Zsh (cloned directly: the official installer would also replace ~/.zshrc and run chsh)
+    if [[ -f "$omz_dir/oh-my-zsh.sh" ]]; then
+        log_success "Oh My Zsh already installed"
+    else
+        log "Installing Oh My Zsh..."
+        if git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git "$omz_dir" >> "$LOG_FILE" 2>&1; then
+            log_success "Oh My Zsh installed"
+        else
+            log_error "Failed to install Oh My Zsh"
+        fi
+    fi
 
-# Transient prompt — show minimal prompt for previous commands
-function starship_transient_prompt_func
-    starship module character
-end
+    # Powerlevel10k theme
+    if [[ -d "$p10k_dir" ]]; then
+        log_success "Powerlevel10k already installed"
+    elif [[ -d "$omz_dir" ]]; then
+        log "Installing Powerlevel10k..."
+        if git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$p10k_dir" >> "$LOG_FILE" 2>&1; then
+            log_success "Powerlevel10k installed"
+        else
+            log_error "Failed to install Powerlevel10k"
+        fi
+    fi
 
-# Starship prompt with transient prompt enabled
-if command -q starship
-    starship init fish | source
-    enable_transience
-end
+    # ~/.zshrc: a config without Oh My Zsh is moved aside (like the Oh My Zsh installer does)
+    if [[ -f "$zshrc" ]] && ! grep -q 'oh-my-zsh.sh' "$zshrc"; then
+        mv "$zshrc" "$zshrc.pre-oh-my-zsh"
+        log_warning "Existing ~/.zshrc moved to ~/.zshrc.pre-oh-my-zsh"
+    fi
+
+    if [[ ! -f "$zshrc" ]]; then
+        log "Creating Zsh configuration..."
+        cat > "$zshrc" <<'ZSHEOF'
+# Powerlevel10k instant prompt (must stay close to the top of ~/.zshrc)
+if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+fi
+
+# Oh My Zsh
+export ZSH="$HOME/.oh-my-zsh"
+ZSH_THEME="powerlevel10k/powerlevel10k"
+plugins=(git)
+source $ZSH/oh-my-zsh.sh
+
+# Powerlevel10k configuration (run `p10k configure` to regenerate)
+[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
+
+# PATH
+[[ -d "$HOME/.local/bin" ]] && export PATH="$HOME/.local/bin:$PATH"
+[[ -d "$HOME/bin" ]] && export PATH="$HOME/bin:$PATH"
+[[ -d "$HOME/Applications" ]] && export PATH="$HOME/Applications:$PATH"
+[[ -d "$HOME/.cargo/bin" ]] && export PATH="$HOME/.cargo/bin:$PATH"
 
 # Modern CLI replacements
-if command -q eza
+if (( $+commands[eza] )); then
     alias ls='eza --icons --group-directories-first'
     alias ll='eza -l --icons --group-directories-first --git'
     alias la='eza -la --icons --group-directories-first --git'
     alias lt='eza -T --icons --group-directories-first --level=2'
-else
-    alias ll='ls -lah'
-    alias la='ls -A'
-end
+fi
 
-if command -q bat
+if (( $+commands[bat] )); then
     alias cat='bat --style=auto'
-    set -gx MANPAGER "sh -c 'col -bx | bat -l man -p'"
-end
-
-# Navigation
-alias ..='cd ..'
-alias ...='cd ../..'
-alias ....='cd ../../..'
-
-# Git abbreviations
-abbr -a ga 'git add'
-abbr -a gc 'git commit'
-abbr -a gp 'git push'
-abbr -a gl 'git pull'
-abbr -a gs 'git status'
-abbr -a gd 'git diff'
-abbr -a gco 'git checkout'
-abbr -a gb 'git branch'
-abbr -a glog 'git log --oneline --graph --decorate'
-
-# Colored man pages
-set -gx LESS_TERMCAP_mb \e'[1;31m'
-set -gx LESS_TERMCAP_md \e'[1;34m'
-set -gx LESS_TERMCAP_me \e'[0m'
-set -gx LESS_TERMCAP_se \e'[0m'
-set -gx LESS_TERMCAP_so \e'[1;33m'
-set -gx LESS_TERMCAP_ue \e'[0m'
-set -gx LESS_TERMCAP_us \e'[1;32m'
-FISHEOF
-        log_success "Fish configuration created"
+    export MANPAGER="sh -c 'col -bx | bat -l man -p'"
+fi
+ZSHEOF
+        log_success "Zsh configuration created"
     else
-        # Ensure starship init is present
-        if ! grep -q 'starship init fish' "$fish_conf"; then
-            cat >> "$fish_conf" <<'FISHEOF'
-
-# Starship prompt with transient prompt enabled
-if command -q starship
-    starship init fish | source
-    enable_transience
-end
-FISHEOF
-            log_success "Starship init added to Fish config"
+        # Ensure Powerlevel10k is the Oh My Zsh theme
+        if ! grep -q '^ZSH_THEME="powerlevel10k/powerlevel10k"' "$zshrc"; then
+            if grep -q '^ZSH_THEME=' "$zshrc"; then
+                sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' "$zshrc"
+                log_success "Zsh theme switched to Powerlevel10k"
+            else
+                log_warning "ZSH_THEME not found in ~/.zshrc, set it to \"powerlevel10k/powerlevel10k\" manually"
+            fi
         else
-            log_success "Starship already configured in Fish"
+            log_success "Powerlevel10k already configured in Zsh"
         fi
 
-        # Ensure transient prompt is enabled (configs created by older versions lack it)
-        if ! grep -q 'enable_transience' "$fish_conf"; then
-            cat >> "$fish_conf" <<'FISHEOF'
+        # Ensure the Powerlevel10k config is sourced
+        if ! grep -q 'p10k.zsh' "$zshrc"; then
+            cat >> "$zshrc" <<'ZSHEOF'
 
-# Starship transient prompt
-functions -q enable_transience; and enable_transience
-FISHEOF
-            log_success "Starship transient prompt enabled in Fish config"
+# Powerlevel10k configuration (run `p10k configure` to regenerate)
+[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
+ZSHEOF
+            log_success "Powerlevel10k config sourcing added to ~/.zshrc"
         fi
     fi
 
     # Ensure update alias is present
-    if ! grep -q "alias update=" "$fish_conf"; then
-        cat >> "$fish_conf" <<'FISHEOF'
+    if ! grep -q "alias update=" "$zshrc"; then
+        cat >> "$zshrc" <<'ZSHEOF'
 
 # System update
-alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids; or true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y'
-FISHEOF
-        log_success "Update alias added to Fish config"
+alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove -y; sudo dnf clean packages; sudo update-pciids || true; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update -y; git -C "$ZSH/custom/themes/powerlevel10k" pull --ff-only'
+ZSHEOF
+        log_success "Update alias added to ~/.zshrc"
     fi
 
-    # Install Starship
-    if command -v starship >/dev/null 2>&1; then
-        log_success "Starship already installed"
-    else
-        log "Installing Starship..."
-        if curl -fsSL https://starship.rs/install.sh | sh -s -- -y; then
-            log_success "Starship installed"
+    # Set zsh as default shell
+    local zsh_path
+    local current_shell
+
+    zsh_path="$(command -v zsh)"
+    current_shell="$(getent passwd "$USER" | cut -d: -f7 || echo "")"
+
+    # Ensure zsh is in /etc/shells
+    if ! grep -qx "$zsh_path" /etc/shells; then
+        echo "$zsh_path" | sudo tee -a /etc/shells >> "$LOG_FILE" 2>&1
+        log_success "Zsh added to /etc/shells"
+    fi
+
+    if [[ "$current_shell" != "$zsh_path" ]]; then
+        log "Changing default shell to Zsh..."
+        if chsh -s "$zsh_path" 2>&1 | tee -a "$LOG_FILE"; then
+            log_success "Default shell changed to Zsh (re-login to apply)"
         else
-            log_error "Failed to install Starship"
+            log_error "Failed to change default shell"
         fi
-    fi
-
-    # Configure Starship
-    local starship_conf="$HOME/.config/starship.toml"
-    if [[ ! -f "$starship_conf" ]]; then
-        log "Creating Starship configuration..."
-        cat > "$starship_conf" <<'STAREOF'
-# Starship prompt — Catppuccin Mocha powerline style
-
-palette = "catppuccin_mocha"
-
-format = """
-[](mauve)\
-$os\
-$username\
-[](bg:blue fg:mauve)\
-$directory\
-[](bg:green fg:blue)\
-$git_branch\
-$git_status\
-[](bg:teal fg:green)\
-$python\
-$rust\
-$golang\
-$nodejs\
-$java\
-$docker_context\
-[](bg:surface0 fg:teal)\
-$cmd_duration\
-$status\
-[](fg:surface0)\
-$fill\
-[](fg:surface0)\
-$time\
-[](fg:mauve bg:surface0)\
-$battery\
-[](fg:mauve)\
-$line_break\
-$character"""
-
-[os]
-disabled = false
-style = "bg:mauve fg:crust"
-[os.symbols]
-Fedora = " "
-Linux = " "
-Macos = " "
-Windows = " "
-
-[username]
-show_always = false
-style_user = "bg:mauve fg:crust"
-style_root = "bg:red fg:crust bold"
-format = '[ $user]($style)'
-
-[directory]
-style = "bg:blue fg:crust"
-format = "[ $path ]($style)"
-truncation_length = 3
-truncation_symbol = "…/"
-[directory.substitutions]
-"Documents" = "󰈙 "
-"Downloads" = " "
-"Music" = "󰎆 "
-"Pictures" = " "
-"Development" = "󰲋 "
-
-[git_branch]
-symbol = ""
-style = "bg:green fg:crust"
-format = '[ $symbol $branch ]($style)'
-
-[git_status]
-style = "bg:green fg:crust"
-format = '[$all_status$ahead_behind ]($style)'
-conflicted = " "
-ahead = "⇡${count} "
-behind = "⇣${count} "
-diverged = "⇕⇡${ahead_count}⇣${behind_count} "
-up_to_date = ""
-untracked = " "
-stashed = "󰏗 "
-modified = " "
-staged = " "
-renamed = "󰁕 "
-deleted = " "
-
-[python]
-symbol = ""
-style = "bg:teal fg:crust"
-format = '[ $symbol $version(\($virtualenv\)) ]($style)'
-
-[rust]
-symbol = ""
-style = "bg:teal fg:crust"
-format = '[ $symbol $version ]($style)'
-
-[golang]
-symbol = ""
-style = "bg:teal fg:crust"
-format = '[ $symbol $version ]($style)'
-
-[nodejs]
-symbol = ""
-style = "bg:teal fg:crust"
-format = '[ $symbol $version ]($style)'
-
-[java]
-symbol = ""
-style = "bg:teal fg:crust"
-format = '[ $symbol $version ]($style)'
-
-[docker_context]
-symbol = ""
-style = "bg:teal fg:crust"
-format = '[ $symbol $context ]($style)'
-
-[cmd_duration]
-min_time = 2_000
-style = "bg:surface0 fg:text"
-format = '[ 󱎫 $duration ]($style)'
-
-[status]
-disabled = false
-style = "bg:surface0 fg:red"
-format = '[ $symbol$status ]($style)'
-symbol = " "
-
-[fill]
-symbol = " "
-
-[time]
-disabled = false
-time_format = "%H:%M"
-style = "bg:surface0 fg:subtext0"
-format = '[ 󰥔 $time ]($style)'
-
-[battery]
-disabled = true
-
-[character]
-success_symbol = "[❯](bold green)"
-error_symbol = "[❯](bold red)"
-vimcmd_symbol = "[❮](bold mauve)"
-
-[palettes.catppuccin_mocha]
-rosewater = "#f5e0dc"
-flamingo  = "#f2cdcd"
-pink      = "#f5c2e7"
-mauve     = "#cba6f7"
-red       = "#f38ba8"
-maroon    = "#eba0ac"
-peach     = "#fab387"
-yellow    = "#f9e2af"
-green     = "#a6e3a1"
-teal      = "#94e2d5"
-sky       = "#89dceb"
-sapphire  = "#74c7ec"
-blue      = "#89b4fa"
-lavender  = "#b4befe"
-text      = "#cdd6f4"
-subtext1  = "#bac2de"
-subtext0  = "#a6adc8"
-overlay2  = "#9399b2"
-overlay1  = "#7f849c"
-overlay0  = "#6c7086"
-surface2  = "#585b70"
-surface1  = "#45475a"
-surface0  = "#313244"
-base      = "#1e1e2e"
-mantle    = "#181825"
-crust     = "#11111b"
-STAREOF
-        log_success "Starship configuration created"
     else
-        log_success "Starship configuration already exists"
+        log_success "Zsh already set as default shell"
     fi
+}
 
-    # Set fish as default shell
-    if command_exists fish; then
-        local fish_path
-        local current_shell
+configure_terminal_font() {
+    log_section "Configuring terminal font"
 
-        fish_path="$(command -v fish)"
-        current_shell="$(getent passwd "$USER" | cut -d: -f7 || echo "")"
-
-        # Ensure fish is in /etc/shells
-        if ! grep -qx "$fish_path" /etc/shells; then
-            echo "$fish_path" | sudo tee -a /etc/shells >> "$LOG_FILE" 2>&1
-            log_success "Fish added to /etc/shells"
-        fi
-
-        if [[ "$current_shell" != "$fish_path" ]]; then
-            log "Changing default shell to Fish..."
-            if chsh -s "$fish_path" 2>&1 | tee -a "$LOG_FILE"; then
-                log_success "Default shell changed to Fish (re-login to apply)"
-            else
-                log_error "Failed to change default shell"
-            fi
+    # Ptyxis is the default GNOME terminal; a Nerd Font is required for Powerlevel10k icons
+    if command_exists gsettings && gsettings list-schemas 2>/dev/null | grep -qx org.gnome.Ptyxis; then
+        if gsettings set org.gnome.Ptyxis use-system-font false 2>> "$LOG_FILE" && \
+           gsettings set org.gnome.Ptyxis font-name "$FONT_SETTINGS" 2>> "$LOG_FILE"; then
+            log_success "Ptyxis font set to $FONT_SETTINGS"
         else
-            log_success "Fish already set as default shell"
+            log_error "Failed to set Ptyxis font"
         fi
     else
-        log_error "Fish not installed, skipping shell change"
+        log_warning "Ptyxis not found, set your terminal font to '$FONT_NAME' manually"
     fi
 }
 
@@ -642,14 +466,19 @@ optimize_system() {
     fi
 }
 
-# Hide a system autostart entry for the current user via ~/.config/autostart override
-disable_autostart_entry() {
-    local desktop_file="$1"
-    local label="$2"
-    local system_file="/etc/xdg/autostart/$desktop_file"
-    local autostart_file="$HOME/.config/autostart/$desktop_file"
+# Hide GNOME Software autostart for the current user via ~/.config/autostart override
+disable_software_autostart() {
+    log_section "Disabling GNOME Software autostart"
 
-    [[ -f "$system_file" ]] || return 0
+    local system_file="/etc/xdg/autostart/org.gnome.Software.desktop"
+    local autostart_file="$HOME/.config/autostart/org.gnome.Software.desktop"
+
+    if [[ ! -f "$system_file" ]]; then
+        log "GNOME Software autostart entry not found, skipping"
+        return 0
+    fi
+
+    mkdir -p "$HOME/.config/autostart"
 
     if [[ ! -f "$autostart_file" ]]; then
         cp "$system_file" "$autostart_file" 2>&1 | tee -a "$LOG_FILE" || true
@@ -661,25 +490,7 @@ disable_autostart_entry() {
         printf '\nHidden=true\n' >> "$autostart_file"
     fi
 
-    log_success "$label autostart disabled"
-}
-
-disable_software_autostart() {
-    log_section "Disabling software store autostart"
-
-    mkdir -p "$HOME/.config/autostart"
-
-    case "$DESKTOP_ENV" in
-        GNOME)
-            disable_autostart_entry org.gnome.Software.desktop "GNOME Software"
-            ;;
-        KDE)
-            disable_autostart_entry org.kde.discover.notifier.desktop "KDE Discover"
-            ;;
-        *)
-            log "Unknown desktop environment, skipping software store autostart configuration"
-            ;;
-    esac
+    log_success "GNOME Software autostart disabled"
 }
 
 setup_repositories() {
@@ -772,7 +583,7 @@ install_packages() {
         wireguard-tools wget
         
         # Shell
-        fish
+        zsh
 
         # Modern CLI tools
         eza bat
@@ -786,13 +597,7 @@ install_packages() {
         # Applications
         google-chrome-stable 1password master-pdf-editor flatseal
     )
-    
-    # Add KDE-specific packages
-    if [[ "$DESKTOP_ENV" == "KDE" ]]; then
-        packages+=(virt-manager)
-        log "KDE detected, adding virt-manager to installation list"
-    fi
-    
+
     echo ""
     log "Installing main packages..."
     log "Packages: ${packages[*]}"
@@ -840,7 +645,6 @@ install_flatpaks() {
         log "Flathub repository already exists or failed to add (continuing anyway)"
     fi
     
-    # Common apps for all desktop environments
     local flatpak_apps=(
         com.spotify.Client
         com.termius.Termius
@@ -848,14 +652,9 @@ install_flatpaks() {
         it.mijorus.gearlever
         io.github.kolunmi.Bazaar
         me.proton.Mail
+        com.mattjakeman.ExtensionManager
     )
-    
-    # Add GNOME-specific apps
-    if [[ "$DESKTOP_ENV" == "GNOME" ]]; then
-        flatpak_apps+=(com.mattjakeman.ExtensionManager)
-        log "GNOME detected, adding Extension Manager to installation list"
-    fi
-    
+
     echo ""
     log "Installing Flatpak applications (this may take a while)..."
     log "Apps to install: ${flatpak_apps[*]}"
@@ -964,16 +763,6 @@ download_third_party_apps() {
     fi
     fetch_package "Ledger Live" "$url" "${url##*/}" "ledger-live-desktop-*.AppImage"
 
-    # Tabby Terminal
-    log "Checking for Tabby Terminal updates..."
-    url=$(github_asset_url "Eugeny/tabby" 'linux-x64\.rpm$')
-    fetch_package "Tabby Terminal" "$url" "${url##*/}" "tabby-*.rpm"
-
-    # Bruno API Client
-    log "Checking for Bruno updates..."
-    url=$(github_asset_url "usebruno/bruno" '_x86_64_linux\.rpm$')
-    fetch_package "Bruno" "$url" "${url##*/}" "bruno_*.rpm"
-
     # Telegram Desktop
     log "Checking for Telegram Desktop updates..."
     url=$(github_asset_url "telegramdesktop/tdesktop" 'td-setup-linux-x64-[0-9.]+\.tar\.xz$')
@@ -992,11 +781,6 @@ download_third_party_apps() {
         log_error "WinBox URL not found — MikroTik page format may have changed"
     fi
 
-    # balenaEtcher
-    log "Checking for balenaEtcher updates..."
-    url=$(github_asset_url "balena-io/etcher" 'balenaEtcher-linux-x64-[0-9.]+\.zip$')
-    fetch_package "balenaEtcher" "$url" "${url##*/}" "balenaEtcher-linux-x64-*.zip"
-
     echo ""
     log_success "Third-party applications downloaded"
     popd >/dev/null
@@ -1007,23 +791,6 @@ install_third_party_apps() {
     
     pushd "$PACKAGES_DIR" >/dev/null
     mkdir -p "$APPS_DIR"
-    
-    # Install RPM packages
-    local rpm_files=(./*.rpm)
-    if [[ "${rpm_files[0]}" != "./*.rpm" ]]; then
-        echo ""
-        log "Installing RPM packages..."
-        echo ""
-        if sudo dnf -y install "${rpm_files[@]}"; then
-            echo "RPM packages installed successfully" >> "$LOG_FILE"
-            echo ""
-            log_success "RPM packages installed"
-        else
-            echo "RPM packages installation had some errors" >> "$LOG_FILE"
-            echo ""
-            log_error "Some RPM packages failed to install"
-        fi
-    fi
     
     # Install Ledger Live AppImage under a stable name
     local ledger_appimages=(./ledger-live-desktop-*.AppImage)
@@ -1062,36 +829,6 @@ install_third_party_apps() {
         fi
     fi
     
-    # Extract balenaEtcher
-    local etcher_zips=(./balenaEtcher-linux-x64-*.zip)
-    if [[ "${etcher_zips[0]}" != "./balenaEtcher-linux-x64-*.zip" ]]; then
-        log "Extracting balenaEtcher..."
-        local temp_dir
-        temp_dir=$(mktemp -d)
-        TEMP_FILES+=("$temp_dir")
-
-        if unzip -oq "${etcher_zips[0]}" -d "$temp_dir" 2>> "$LOG_FILE"; then
-            rm -rf "$APPS_DIR/balenaEtcher"
-            mkdir -p "$APPS_DIR/balenaEtcher"
-            
-            if [[ -d "$temp_dir/balenaEtcher-linux-x64" ]]; then
-                cp -a "$temp_dir/balenaEtcher-linux-x64/." "$APPS_DIR/balenaEtcher/"
-            else
-                cp -a "$temp_dir/." "$APPS_DIR/balenaEtcher/"
-            fi
-            
-            for binary in "$APPS_DIR/balenaEtcher/balena-etcher" "$APPS_DIR/balenaEtcher/balenaEtcher" "$APPS_DIR/balenaEtcher/etcher"; do
-                [[ -f "$binary" ]] && chmod +x "$binary"
-            done
-            
-            log_success "balenaEtcher installed to $APPS_DIR/balenaEtcher"
-        else
-            log_error "Failed to extract balenaEtcher"
-        fi
-        
-        rm -rf "$temp_dir"
-    fi
-
     popd >/dev/null
 }
 
@@ -1106,12 +843,11 @@ main() {
     
     check_fedora
     check_not_root
+    check_gnome
     start_sudo_keepalive
 
     # Perform initial system update and check if reboot is needed
     initial_system_update
-
-    detect_desktop_environment
 
     # Basic packages and Nerd Font (doesn't require repos)
     install_basic_packages
@@ -1139,30 +875,28 @@ main() {
     download_third_party_apps
     install_third_party_apps
 
-    # Shell setup
-    setup_fish
+    # Shell and terminal setup
+    setup_zsh
+    configure_terminal_font
 
     log_section "Setup Complete!"
     log "Log file saved to: $LOG_FILE"
     log ""
-    log "Detected desktop environment: $DESKTOP_ENV"
-    log ""
     log "Next steps:"
-    log "  1. Log out and log back in (new default shell: Fish)"
-    log "  2. Set your terminal font to '$FONT_NAME' so Starship icons render"
-    log "  3. Verify setup: starship --version, zed --version"
+    log "  1. Log out and log back in (new default shell: Zsh)"
+    log "  2. Open a terminal: the Powerlevel10k wizard starts if ~/.p10k.zsh does not exist"
+    log "     (re-run it anytime with 'p10k configure')"
+    log "  3. Verify setup: zsh --version, zed --version"
     log "  4. Use 'update' command anytime to update your system"
     log ""
-    log "Shell:"
-    log "  - Shell: Fish with Starship prompt"
-    log "  - Font: FiraCode Nerd Font Mono"
+    log "Shell and terminal:"
+    log "  - Shell: Zsh with Oh My Zsh and Powerlevel10k"
+    log "  - Terminal font (Ptyxis): $FONT_SETTINGS"
     log ""
     log "Installed applications:"
     log "  - Editors: Zed"
-    log "  - Terminal: Tabby"
-    log "  - Development: Bruno API Client"
     log "  - Communication: Telegram, Zoom"
-    log "  - Utilities: Ledger Live, WinBox, balenaEtcher"
+    log "  - Utilities: Ledger Live, WinBox"
     log "  - Flatpaks: Bazaar, Proton Mail, Spotify, and more"
     log ""
     log "Installed fonts:"
