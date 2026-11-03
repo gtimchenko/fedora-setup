@@ -5,7 +5,7 @@ This script automates the setup of a fresh Fedora Workstation (GNOME) installati
 - Font collection (FiraCode Nerd Font, Noto, DejaVu, Liberation, Inter)
 - RPM Fusion repositories (free, nonfree, and tainted)
 - Essential system tools and applications
-- Performance optimizations
+- Parallel DNF downloads and firmware metadata refresh
 - Third-party applications (Chrome, 1Password, Zed, etc.)
 
 Only GNOME is supported.

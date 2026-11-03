@@ -7,7 +7,7 @@
 # - Font collection (FiraCode Nerd Font, Noto, DejaVu, Liberation, Inter)
 # - RPM Fusion repositories (free, nonfree, and tainted)
 # - Essential system tools and applications
-# - Performance optimizations
+# - Parallel DNF downloads and firmware metadata refresh
 # - Third-party applications (Chrome, 1Password, Zed, etc.)
 #
 # Only GNOME is supported.
@@ -24,7 +24,7 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.2.1"
 readonly LOG_DIR="$HOME/.local/state/fedora-setup"
 LOG_FILE="$LOG_DIR/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly LOG_FILE
@@ -41,6 +41,11 @@ readonly FONT_ZIP_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest/d
 # DNF configuration
 readonly DNF_MAX_PARALLEL=10
 
+# curl timeouts: small requests (APIs, pages, scripts) are capped in total time,
+# large downloads only in connection time
+readonly -a CURL_SMALL=(--connect-timeout 15 --max-time 60)
+readonly -a CURL_LARGE=(--connect-timeout 15)
+
 # Zsh plugins from Fedora packages
 readonly ZSH_AUTOSUGGESTIONS="/usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
 readonly ZSH_SYNTAX_HIGHLIGHTING="/usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
@@ -50,7 +55,7 @@ readonly ZSH_SYNTAX_HIGHLIGHTING="/usr/share/zsh-syntax-highlighting/zsh-syntax-
 # Starship is reinstalled only when GitHub has a newer release than the installed one.
 readonly ZSH_UPDATE_ALIAS_PREFIX="alias update='sudo dnf upgrade --refresh -y;"
 ZSH_UPDATE_ALIAS="$(cat <<'EOF'
-alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove; sudo dnf clean packages; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update; ( latest=$(curl -fsSL https://api.github.com/repos/starship/starship/releases/latest | jq -r .tag_name); current=v$(starship --version | head -n 1 | cut -d" " -f2); if [ -z "$latest" ] || [ "$latest" = null ]; then echo "Could not check for Starship updates"; elif [ "$latest" != "$current" ]; then curl -fsSL https://starship.rs/install.sh | sh -s -- -y; else echo "Starship is up to date ($current)"; fi )'
+alias update='sudo dnf upgrade --refresh -y; sudo dnf autoremove; sudo dnf clean packages; flatpak update -y; sudo fwupdmgr refresh --force; sudo fwupdmgr update; ( latest=$(curl -fsSL --connect-timeout 15 --max-time 60 https://api.github.com/repos/starship/starship/releases/latest | jq -r .tag_name); current=v$(starship --version | head -n 1 | cut -d" " -f2); if [ -z "$latest" ] || [ "$latest" = null ]; then echo "Could not check for Starship updates"; elif [ "$latest" != "$current" ]; then curl -fsSL --connect-timeout 15 --max-time 60 https://starship.rs/install.sh | sh -s -- -y; else echo "Starship is up to date ($current)"; fi )'
 EOF
 )"
 readonly ZSH_UPDATE_ALIAS
@@ -123,13 +128,55 @@ command_exists() {
 }
 
 # dnf with --skip-unavailable exits successfully even when it skips packages:
-# report the requested packages that are still not installed
+# report the requested packages that are still not installed. --whatprovides is
+# needed because some names are provided by differently named packages
+# (wget -> wget2-wget, liberation-fonts -> liberation-fonts-all)
 report_missing_packages() {
-    local missing
-    missing="$(rpm -q "$@" 2>/dev/null | awk '/is not installed$/ {print $2}' | paste -sd ' ' || true)"
-    if [[ -n "$missing" ]]; then
-        log_warning "Not installed (unavailable or failed): $missing"
+    local missing=()
+    local pkg
+    for pkg in "$@"; do
+        if ! rpm -q --whatprovides "$pkg" >/dev/null 2>&1; then
+            missing+=("$pkg")
+        fi
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_warning "Not installed (unavailable or failed): ${missing[*]}"
     fi
+}
+
+# Replace an app directory with a freshly extracted copy. Extraction goes to a staging
+# directory first, so the working copy is kept if extraction fails.
+# Usage: replace_app_dir <app_dir> <archive_name> <extract command...>
+# The extract command gets the staging directory as its last argument and must
+# create <staging>/<basename of app_dir> in it.
+replace_app_dir() {
+    local app_dir="$1"
+    local archive="$2"
+    shift 2
+
+    local name
+    name="$(basename "$app_dir")"
+    local staging
+    staging="$(mktemp -d "$(dirname "$app_dir")/.staging.XXXXXX")"
+    TEMP_FILES+=("$staging")
+
+    if "$@" "$staging" 2>> "$LOG_FILE" && [[ -d "$staging/$name" ]]; then
+        rm -rf "$app_dir"
+        if mv "$staging/$name" "$app_dir"; then
+            echo "$archive" > "$app_dir/.installed-from"
+            rm -rf "$staging"
+            return 0
+        fi
+    fi
+    rm -rf "$staging"
+    return 1
+}
+
+# Extract the WinBox zip (it has no top-level directory) into <dest>/WinBox
+extract_winbox_zip() {
+    local zip="$1"
+    local dest="$2"
+    mkdir -p "$dest/WinBox" && unzip -oq "$zip" -d "$dest/WinBox"
 }
 
 # Create a desktop entry so an app installed outside the package manager
@@ -291,7 +338,8 @@ install_basic_packages() {
 install_nerd_font() {
     log_section "Installing FiraCode Nerd Font"
     
-    if fc-list ":family=$FONT_NAME" | grep -q .; then
+    # grep without -q reads all input: with pipefail, an early exit would SIGPIPE fc-list
+    if fc-list ":family=$FONT_NAME" | grep . >/dev/null; then
         log_success "FiraCode Nerd Font already installed"
         return 0
     fi
@@ -300,7 +348,7 @@ install_nerd_font() {
     local temp_zip="$FONT_DIR/FiraCode.zip"
     
     log "Downloading FiraCode Nerd Font..."
-    if curl -fsSL -o "$temp_zip" "$FONT_ZIP_URL"; then
+    if curl -fsSL "${CURL_LARGE[@]}" -o "$temp_zip" "$FONT_ZIP_URL"; then
         # Font files only: the archive also contains README.md and LICENSE
         if unzip -oq "$temp_zip" '*.ttf' -d "$FONT_DIR"; then
             fc-cache -f >/dev/null || true
@@ -349,7 +397,7 @@ install_starship() {
         log_success "Starship already installed"
     else
         log "Installing Starship..."
-        if curl -fsSL https://starship.rs/install.sh | sh -s -- -y; then
+        if curl -fsSL "${CURL_SMALL[@]}" https://starship.rs/install.sh | sh -s -- -y; then
             log_success "Starship installed"
         else
             log_error "Failed to install Starship"
@@ -591,7 +639,7 @@ typeset -U path PATH
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME=""
 plugins=(git)
-source $ZSH/oh-my-zsh.sh
+[[ -r $ZSH/oh-my-zsh.sh ]] && source $ZSH/oh-my-zsh.sh
 
 # Starship prompt
 if (( $+commands[starship] )); then
@@ -724,7 +772,7 @@ configure_terminal_font() {
     log_section "Configuring terminal font"
 
     # Ptyxis is the default GNOME terminal; a Nerd Font is required for Starship icons
-    if command_exists gsettings && gsettings list-schemas 2>/dev/null | grep -qx org.gnome.Ptyxis; then
+    if command_exists gsettings && gsettings list-schemas 2>/dev/null | grep -x org.gnome.Ptyxis >/dev/null; then
         if gsettings set org.gnome.Ptyxis use-system-font false 2>> "$LOG_FILE" && \
            gsettings set org.gnome.Ptyxis font-name "$FONT_SETTINGS" 2>> "$LOG_FILE"; then
             log_success "Ptyxis font set to $FONT_SETTINGS"
@@ -809,7 +857,7 @@ EOF
     # Master PDF Editor repository
     log "Adding Master PDF Editor repository..."
     temp_repo="$(mktemp)"
-    if curl -fsSL -o "$temp_repo" http://repo.code-industry.net/rpm/master-pdf-editor.repo 2>&1 | tee -a "$LOG_FILE"; then
+    if curl -fsSL "${CURL_SMALL[@]}" -o "$temp_repo" http://repo.code-industry.net/rpm/master-pdf-editor.repo 2>&1 | tee -a "$LOG_FILE"; then
         if [[ ! -f /etc/yum.repos.d/master-pdf-editor.repo ]] || ! sudo cmp -s "$temp_repo" /etc/yum.repos.d/master-pdf-editor.repo; then
             sudo install -m0644 "$temp_repo" /etc/yum.repos.d/master-pdf-editor.repo 2>&1 | tee -a "$LOG_FILE" || true
             log_success "Master PDF Editor repository added"
@@ -876,7 +924,7 @@ install_packages() {
     echo ""
     log "Installing multimedia support..."
     echo ""
-    sudo dnf -y group install --skip-unavailable multimedia --setopt=strict=0 || log_error "Multimedia group install had issues"
+    sudo dnf -y group install --skip-unavailable multimedia || log_error "Multimedia group install had issues"
     
     # Replace free versions with full-featured ones
     echo ""
@@ -936,7 +984,7 @@ setup_ledger_udev() {
     TEMP_FILES+=("$temp_script")
 
     log "Downloading Ledger udev rules script..."
-    if curl -fsSL -o "$temp_script" https://raw.githubusercontent.com/LedgerHQ/udev-rules/master/add_udev_rules.sh 2>> "$LOG_FILE"; then
+    if curl -fsSL "${CURL_SMALL[@]}" -o "$temp_script" https://raw.githubusercontent.com/LedgerHQ/udev-rules/master/add_udev_rules.sh 2>> "$LOG_FILE"; then
         log "Executing Ledger udev rules script..."
         if sudo bash "$temp_script" >> "$LOG_FILE" 2>&1; then
             log_success "Ledger udev rules installed"
@@ -959,7 +1007,7 @@ install_zed_editor() {
     fi
 
     log "Installing Zed editor..."
-    if curl -fsSL https://zed.dev/install.sh | sh 2>&1 | tee -a "$LOG_FILE"; then
+    if curl -fsSL "${CURL_SMALL[@]}" https://zed.dev/install.sh | sh 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Zed editor installed"
     else
         log_error "Failed to install Zed editor"
@@ -970,7 +1018,7 @@ install_zed_editor() {
 github_asset_url() {
     local repo="$1"
     local regex="$2"
-    curl -fsSL "https://api.github.com/repos/$repo/releases/latest" 2>> "$LOG_FILE" | \
+    curl -fsSL "${CURL_SMALL[@]}" "https://api.github.com/repos/$repo/releases/latest" 2>> "$LOG_FILE" | \
         jq -r --arg re "$regex" '[.assets[]?.browser_download_url | select(test($re))][0] // empty' 2>> "$LOG_FILE" || true
 }
 
@@ -1012,9 +1060,11 @@ download_third_party_apps() {
 
     local url
 
-    # Ledger Live (the "latest" URL redirects to the versioned AppImage)
+    # Ledger Live: the "latest" URL redirects to the versioned AppImage. Read the redirect
+    # target without following it (following would download the whole ~200 MB file;
+    # the server supports neither HEAD nor range requests)
     log "Checking for Ledger Live updates..."
-    url=$(curl -fsSL -w '%{url_effective}' -o /dev/null "https://download.live.ledger.com/latest/linux" 2>> "$LOG_FILE" || true)
+    url=$(curl -sS "${CURL_SMALL[@]}" -o /dev/null -w '%{redirect_url}' "https://download.live.ledger.com/latest/linux" 2>> "$LOG_FILE" || true)
     if [[ "$url" != *.AppImage ]]; then
         url=""
     fi
@@ -1028,7 +1078,7 @@ download_third_party_apps() {
     # MikroTik WinBox (URL is scraped from the download page; the file is renamed
     # to include the version, since the upstream name is always WinBox_Linux.zip)
     log "Checking for WinBox updates..."
-    url=$(curl -fsSL "https://mikrotik.com/download/winbox" 2>> "$LOG_FILE" | \
+    url=$(curl -fsSL "${CURL_SMALL[@]}" "https://mikrotik.com/download/winbox" 2>> "$LOG_FILE" | \
         grep -Eo 'https://[a-z]+\.mikrotik\.com/routeros/winbox/[^"]+/WinBox_Linux\.zip' | head -n 1 || true)
     if [[ -n "$url" ]]; then
         local winbox_version
@@ -1081,9 +1131,13 @@ install_third_party_apps() {
                 TEMP_FILES+=("$temp_dir")
                 # The top-level icon is a symlink into usr/share/icons, so extract the real files
                 (cd "$temp_dir" && "$ledger_target" --appimage-extract 'usr/share/icons/*') >/dev/null 2>&1 || true
-                local icon_src="$temp_dir/squashfs-root/usr/share/icons/hicolor/256x256/apps/ledger-live-desktop.png"
-                if [[ ! -f "$icon_src" ]]; then
-                    icon_src="$(find "$temp_dir/squashfs-root" -type f -name 'ledger-live-desktop.png' 2>/dev/null | head -n 1 || true)"
+                # Prefer a 256x256 icon; don't depend on its file name (the app was renamed
+                # to "Ledger Wallet", so the icon name may change too)
+                local icons_root="$temp_dir/squashfs-root/usr/share/icons"
+                local icon_src
+                icon_src="$(find "$icons_root" -type f -path '*/256x256/apps/*.png' 2>/dev/null | head -n 1 || true)"
+                if [[ -z "$icon_src" ]]; then
+                    icon_src="$(find "$icons_root" -type f -name '*.png' 2>/dev/null | head -n 1 || true)"
                 fi
                 if [[ -n "$icon_src" ]] && [[ -f "$icon_src" ]]; then
                     cp "$icon_src" "$ledger_icon"
@@ -1110,12 +1164,10 @@ install_third_party_apps() {
             log_warning "Telegram Desktop is running, skipping update (close it and re-run the script)"
         else
             log "Extracting Telegram Desktop..."
-            rm -rf "$tg_dir"
-            if tar -xJf "$tg_archive" -C "$APPS_DIR" 2>> "$LOG_FILE"; then
-                echo "$tg_archive" > "$tg_dir/.installed-from"
+            if replace_app_dir "$tg_dir" "$tg_archive" tar -xJf "$tg_archive" -C; then
                 log_success "Telegram installed to $tg_dir"
             else
-                log_error "Failed to extract Telegram"
+                log_error "Failed to extract Telegram (previous version kept)"
             fi
         fi
     fi
@@ -1132,16 +1184,13 @@ install_third_party_apps() {
             log_warning "WinBox is running, skipping update (close it and re-run the script)"
         else
             log "Extracting WinBox..."
-            rm -rf "$winbox_dir"
-            mkdir -p "$winbox_dir"
-            if unzip -oq "$winbox_zip" -d "$winbox_dir" 2>> "$LOG_FILE"; then
+            if replace_app_dir "$winbox_dir" "$winbox_zip" extract_winbox_zip "$winbox_zip"; then
                 if [[ -f "$winbox_dir/WinBox" ]]; then
                     chmod +x "$winbox_dir/WinBox"
                 fi
-                echo "$winbox_zip" > "$winbox_dir/.installed-from"
                 log_success "WinBox installed to $winbox_dir"
             else
-                log_error "Failed to extract WinBox"
+                log_error "Failed to extract WinBox (previous version kept)"
             fi
         fi
 
