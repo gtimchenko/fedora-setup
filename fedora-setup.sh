@@ -24,7 +24,7 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-readonly SCRIPT_VERSION="2.2.1"
+readonly SCRIPT_VERSION="2.3.0"
 readonly LOG_DIR="$HOME/.local/state/fedora-setup"
 LOG_FILE="$LOG_DIR/fedora-setup-$(date +%Y%m%d-%H%M%S).log"
 readonly LOG_FILE
@@ -41,10 +41,22 @@ readonly FONT_ZIP_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest/d
 # DNF configuration
 readonly DNF_MAX_PARALLEL=10
 
-# curl timeouts: small requests (APIs, pages, scripts) are capped in total time,
-# large downloads only in connection time
+# curl timeouts: small requests (APIs, pages, scripts) are capped in total time.
+# Large downloads are not, but a transfer slower than 10 KB/s for 60 s counts as stalled
+# and is retried (a stalled connection otherwise hangs forever)
 readonly -a CURL_SMALL=(--connect-timeout 15 --max-time 60)
-readonly -a CURL_LARGE=(--connect-timeout 15)
+readonly -a CURL_DOWNLOAD=(--connect-timeout 15 --speed-limit 10240 --speed-time 60 --retry 3 --retry-delay 5)
+
+# Flatpak applications (Flathub)
+readonly -a FLATPAK_APPS=(
+    com.spotify.Client
+    com.termius.Termius
+    us.zoom.Zoom
+    it.mijorus.gearlever
+    io.github.kolunmi.Bazaar
+    me.proton.Mail
+    com.mattjakeman.ExtensionManager
+)
 
 # Zsh plugins from Fedora packages
 readonly ZSH_AUTOSUGGESTIONS="/usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
@@ -62,6 +74,9 @@ readonly ZSH_UPDATE_ALIAS
 
 # Temporary files to clean up on exit
 TEMP_FILES=()
+
+# Errors and warnings of this run, repeated in the final summary
+PROBLEMS=()
 
 # Background process keeping the sudo timestamp fresh
 SUDO_KEEPALIVE_PID=""
@@ -92,6 +107,7 @@ log_blank() {
 
 log_error() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $*" | tee -a "$LOG_FILE" >&2
+    PROBLEMS+=("ERROR: $*")
 }
 
 log_success() {
@@ -110,6 +126,7 @@ log_colored() {
 
 log_warning() {
     log_colored "1;33" "⚠ $*"
+    PROBLEMS+=("WARNING: $*")
 }
 
 log_critical() {
@@ -348,7 +365,7 @@ install_nerd_font() {
     local temp_zip="$FONT_DIR/FiraCode.zip"
     
     log "Downloading FiraCode Nerd Font..."
-    if curl -fsSL "${CURL_LARGE[@]}" -o "$temp_zip" "$FONT_ZIP_URL"; then
+    if curl -fL --progress-bar "${CURL_DOWNLOAD[@]}" -o "$temp_zip" "$FONT_ZIP_URL"; then
         # Font files only: the archive also contains README.md and LICENSE
         if unzip -oq "$temp_zip" '*.ttf' -d "$FONT_DIR"; then
             fc-cache -f >/dev/null || true
@@ -814,29 +831,59 @@ setup_repositories() {
         "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-${fedora_version}.noarch.rpm" \
         "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-${fedora_version}.noarch.rpm" \
         2>&1 | tee -a "$LOG_FILE" || true
-    
+
+    # Right after a Fedora release the release RPMs at mirrors.rpmfusion.org can still be
+    # pre-release builds (e.g. 45-0.x) with the branched layout: "updates" disabled,
+    # "updates-testing" enabled. Switch to the stable layout of a final release package:
+    # updates on, updates-testing off. (For Fedora 45 the final 45-1 package cannot be
+    # installed yet: it requires "/usr/share/dnf5/libdnf.conf.d/" with a trailing slash,
+    # which dnf5 cannot resolve; a regular dnf upgrade picks it up once that is fixed)
+    local repo_ids
+    repo_ids=" $(sudo dnf repolist --all 2>/dev/null | awk 'NR > 1 {print $1}' | paste -sd ' ' || true) "
+    local kind
+    for kind in free nonfree; do
+        if [[ "$repo_ids" == *" rpmfusion-$kind-updates "* ]]; then
+            sudo dnf config-manager setopt "rpmfusion-$kind-updates.enabled=1" 2>&1 | tee -a "$LOG_FILE" || true
+        fi
+        if [[ "$repo_ids" == *" rpmfusion-$kind-updates-testing "* ]]; then
+            sudo dnf config-manager setopt "rpmfusion-$kind-updates-testing.enabled=0" 2>&1 | tee -a "$LOG_FILE" || true
+        fi
+    done
+
     # RPM Fusion Tainted (free and nonfree)
     log "Adding RPM Fusion Tainted repositories..."
     sudo dnf -y install \
         rpmfusion-free-release-tainted \
         rpmfusion-nonfree-release-tainted \
         2>&1 | tee -a "$LOG_FILE" || true
-    
-    log_success "RPM Fusion repositories (including tainted) configured"
-    
+
+    local rpmfusion_packages=(
+        rpmfusion-free-release rpmfusion-nonfree-release
+        rpmfusion-free-release-tainted rpmfusion-nonfree-release-tainted
+    )
+    if rpm -q "${rpmfusion_packages[@]}" >/dev/null 2>&1; then
+        log_success "RPM Fusion repositories configured: $(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE} ' rpmfusion-free-release rpmfusion-nonfree-release)(stable updates)"
+    else
+        report_missing_packages "${rpmfusion_packages[@]}"
+    fi
+
     # Fedora Workstation repositories
     sudo dnf -y install fedora-workstation-repositories 2>&1 | tee -a "$LOG_FILE" || true
 
     # Enable Google Chrome repository (shipped disabled by fedora-workstation-repositories)
     sudo dnf config-manager setopt google-chrome.enabled=1 2>&1 | tee -a "$LOG_FILE" || true
     
-    # 1Password repository
-    log "Adding 1Password repository..."
-    sudo rpm --import https://downloads.1password.com/linux/keys/1password.asc 2>&1 | tee -a "$LOG_FILE" || true
-    
+    # 1Password repository. Once installed, the 1password package rewrites this file
+    # itself, so an existing file is left alone
     local temp_repo
-    temp_repo="$(mktemp)"
-    cat > "$temp_repo" <<'EOF'
+    if [[ -f /etc/yum.repos.d/1password.repo ]]; then
+        log_success "1Password repository already configured"
+    else
+        log "Adding 1Password repository..."
+        sudo rpm --import https://downloads.1password.com/linux/keys/1password.asc 2>&1 | tee -a "$LOG_FILE" || true
+
+        temp_repo="$(mktemp)"
+        cat > "$temp_repo" <<'EOF'
 [1password]
 name=1Password Stable Channel
 baseurl=https://downloads.1password.com/linux/rpm/stable/$basearch
@@ -845,14 +892,10 @@ gpgcheck=1
 repo_gpgcheck=0
 gpgkey=https://downloads.1password.com/linux/keys/1password.asc
 EOF
-    
-    if [[ ! -f /etc/yum.repos.d/1password.repo ]] || ! sudo cmp -s "$temp_repo" /etc/yum.repos.d/1password.repo; then
         sudo install -m0644 "$temp_repo" /etc/yum.repos.d/1password.repo
+        rm -f "$temp_repo"
         log_success "1Password repository added"
-    else
-        log_success "1Password repository already configured"
     fi
-    rm -f "$temp_repo"
     
     # Master PDF Editor repository
     log "Adding Master PDF Editor repository..."
@@ -932,40 +975,66 @@ install_packages() {
     echo ""
     
     sudo dnf -y swap ffmpeg-free ffmpeg --allowerasing || log_error "FFmpeg swap had issues"
-    sudo dnf -y swap mesa-va-drivers mesa-va-drivers-freeworld --allowerasing || log_error "Mesa VA drivers swap had issues"
-    sudo dnf -y swap mesa-vulkan-drivers mesa-vulkan-drivers-freeworld --allowerasing || log_error "Mesa Vulkan drivers swap had issues"
+    swap_mesa_freeworld mesa-va-drivers mesa-va-drivers-freeworld "Mesa VA-API drivers (RPM Fusion)"
+    swap_mesa_freeworld mesa-vulkan-drivers mesa-vulkan-drivers-freeworld "Mesa Vulkan drivers (RPM Fusion)"
 
     echo ""
-    log_success "Multimedia packages installed"
+    log_success "Multimedia setup finished"
+}
+
+# Replace a Fedora Mesa package with the RPM Fusion "freeworld" build (adds patented
+# video codecs). The freeworld build requires exactly the installed Fedora Mesa version.
+# Only that version is installed, with downgrades forbidden: otherwise dnf (allow_downgrade
+# is on by default) may "solve" a version mismatch by installing an older freeworld build
+# and downgrading the whole Fedora Mesa stack to match it.
+# (Since Fedora 45 there is no mesa-va-drivers package; the swap then just installs
+# the freeworld build.)
+swap_mesa_freeworld() {
+    local from="$1"
+    local to="$2"
+    local label="$3"
+
+    if rpm -q "$to" >/dev/null 2>&1; then
+        log_success "$label already installed"
+        return 0
+    fi
+
+    local mesa_version available
+    mesa_version="$(rpm -q --qf '%{VERSION}\n' mesa-filesystem 2>/dev/null | head -n 1 || true)"
+    available="$(sudo dnf -q repoquery --qf '%{version}\n' "$to" 2>/dev/null | sort -uV | paste -sd ' ' || true)"
+
+    if [[ -z "$mesa_version" || " $available " != *" $mesa_version "* ]]; then
+        log_warning "$label skipped: no RPM Fusion build for Fedora Mesa ${mesa_version:-?} (available: ${available:-none}); re-run the script once RPM Fusion catches up"
+        return 0
+    fi
+
+    if sudo dnf -y swap --allowerasing --setopt=allow_downgrade=False "$from" "$to-$mesa_version"; then
+        log_success "$label installed ($mesa_version)"
+    else
+        log_error "$label: dnf swap failed (see the dnf output above)"
+    fi
 }
 
 install_flatpaks() {
     log_section "Installing Flatpak applications"
     
+    # System-wide Flatpak operations go through sudo: polkit allows them for wheel only
+    # in an active local session, so without sudo they fail over SSH (after downloading
+    # everything)
     log "Adding Flathub repository..."
-    if flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >> "$LOG_FILE" 2>&1; then
+    if sudo flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >> "$LOG_FILE" 2>&1; then
         log_success "Flathub repository configured"
     else
         log "Flathub repository already exists or failed to add (continuing anyway)"
     fi
     
-    local flatpak_apps=(
-        com.spotify.Client
-        com.termius.Termius
-        us.zoom.Zoom
-        it.mijorus.gearlever
-        io.github.kolunmi.Bazaar
-        me.proton.Mail
-        com.mattjakeman.ExtensionManager
-    )
-
     echo ""
     log "Installing Flatpak applications (this may take a while)..."
-    log "Apps to install: ${flatpak_apps[*]}"
+    log "Apps to install: ${FLATPAK_APPS[*]}"
     echo ""
-    
+
     # Install flatpaks with visible progress, log summary to file
-    if flatpak -y install flathub "${flatpak_apps[@]}"; then
+    if sudo flatpak -y install flathub "${FLATPAK_APPS[@]}"; then
         echo "flatpak install completed successfully" >> "$LOG_FILE"
         echo ""
         log_success "Flatpak applications installed"
@@ -1024,7 +1093,9 @@ github_asset_url() {
 
 # Download a file into the current directory unless it is already there, then remove
 # older versions matching old_glob. The download goes to a .part file first, so an
-# interrupted download never ends up under the final name.
+# interrupted download never ends up under the final name. curl rather than wget:
+# Fedora's wget2 shows no progress with -q --show-progress and waits forever on a
+# stalled connection.
 fetch_package() {
     local name="$1"
     local url="$2"
@@ -1042,7 +1113,7 @@ fetch_package() {
     fi
 
     log "Downloading $name..."
-    if wget -q --show-progress -O "$file.part" "$url"; then
+    if curl -fL --progress-bar "${CURL_DOWNLOAD[@]}" -o "$file.part" "$url"; then
         mv -f "$file.part" "$file"
         find . -maxdepth 1 -name "$old_glob" ! -name "$file" -delete
         echo "$name downloaded: $file" >> "$LOG_FILE"
@@ -1204,6 +1275,83 @@ install_third_party_apps() {
 }
 
 # ============================================================================
+# Summary
+# ============================================================================
+
+# Print one summary line: ✓ if the check command succeeds, ✗ otherwise
+summary_item() {
+    local label="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        log "  ✓ $label"
+    else
+        log "  ✗ $label"
+    fi
+}
+
+zsh_is_default_shell() {
+    [[ "$(getent passwd "$(id -un)" | cut -d: -f7)" == "$(command -v zsh)" ]]
+}
+
+nerd_font_installed() {
+    fc-list ":family=$FONT_NAME" | grep . >/dev/null
+}
+
+zed_installed() {
+    command_exists zed || [[ -x "$HOME/.local/bin/zed" ]]
+}
+
+# The summary checks the actual system state instead of listing what was attempted
+print_summary() {
+    log_section "Setup Complete!"
+    log "Log file saved to: $LOG_FILE"
+    log_blank
+    log "Shell and terminal:"
+    summary_item "Zsh is the default shell" zsh_is_default_shell
+    summary_item "Oh My Zsh" test -f "$HOME/.oh-my-zsh/oh-my-zsh.sh"
+    summary_item "Starship prompt (~/.config/starship.toml)" command_exists starship
+    summary_item "$FONT_NAME" nerd_font_installed
+    log_blank
+    log "Applications:"
+    summary_item "Google Chrome" rpm -q google-chrome-stable
+    summary_item "1Password" rpm -q 1password
+    summary_item "Master PDF Editor" rpm -q master-pdf-editor
+    summary_item "Zed" zed_installed
+    summary_item "Telegram" test -x "$APPS_DIR/Telegram/Telegram"
+    summary_item "WinBox" test -x "$APPS_DIR/WinBox/WinBox"
+    summary_item "Ledger Live" test -x "$APPS_DIR/ledger-live-desktop.AppImage"
+    local app
+    for app in "${FLATPAK_APPS[@]}"; do
+        summary_item "$app (Flatpak)" flatpak info --system "$app"
+    done
+    log_blank
+    log "Multimedia (RPM Fusion):"
+    summary_item "ffmpeg" rpm -q ffmpeg
+    summary_item "Mesa VA-API drivers (freeworld)" rpm -q mesa-va-drivers-freeworld
+    summary_item "Mesa Vulkan drivers (freeworld)" rpm -q mesa-vulkan-drivers-freeworld
+
+    if [[ ${#PROBLEMS[@]} -gt 0 ]]; then
+        log_blank
+        log "Problems during this run (${#PROBLEMS[@]}):"
+        local problem
+        for problem in "${PROBLEMS[@]}"; do
+            log "  - $problem"
+        done
+    fi
+
+    log_blank
+    log "Next steps:"
+    log "  1. Log out and log back in (new default shell: Zsh)"
+    log "  2. Use 'update' command anytime to update your system"
+    log_blank
+    if [[ ${#PROBLEMS[@]} -gt 0 ]]; then
+        log "Finished with problems (see above). Re-running the script is safe."
+    else
+        log "All done! Enjoy your Fedora setup!"
+    fi
+}
+
+# ============================================================================
 # Main Execution
 # ============================================================================
 
@@ -1250,30 +1398,7 @@ main() {
     setup_zsh
     configure_terminal_font
 
-    log_section "Setup Complete!"
-    log "Log file saved to: $LOG_FILE"
-    log_blank
-    log "Next steps:"
-    log "  1. Log out and log back in (new default shell: Zsh)"
-    log "  2. Verify setup: zsh --version, starship --version, zed --version"
-    log "  3. Use 'update' command anytime to update your system"
-    log_blank
-    log "Shell and terminal:"
-    log "  - Shell: Zsh with Oh My Zsh and Starship prompt (~/.config/starship.toml)"
-    log "  - Terminal font (Ptyxis): $FONT_SETTINGS"
-    log_blank
-    log "Installed applications:"
-    log "  - Editors: Zed"
-    log "  - Communication: Telegram, Zoom"
-    log "  - Utilities: Ledger Live, WinBox (in the app grid)"
-    log "  - Flatpaks: Bazaar, Proton Mail, Spotify, and more"
-    log_blank
-    log "Installed fonts:"
-    log "  - FiraCode Nerd Font"
-    log "  - Google Noto (Sans, Mono, Emoji)"
-    log "  - DejaVu, Liberation, Inter, Terminus"
-    log_blank
-    log "All done! Enjoy your Fedora setup!"
+    print_summary
 }
 
 # Run main function
